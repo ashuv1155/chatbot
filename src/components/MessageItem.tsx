@@ -7,7 +7,10 @@ import {
   Compass,
   Copy,
   ExternalLink,
+  Eye,
+  FileAudio,
   FileText,
+  FileVideo,
   GitBranch,
   Globe,
   Loader2,
@@ -18,6 +21,7 @@ import {
 } from 'lucide-react';
 import type { ChatMessage, PreviewArtifact, SearchMode } from '../types/chat';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { attachmentToPreviewArtifact } from '../lib/previews';
 import { formatCompactNumber } from '../lib/storage';
 import {
   copyToClipboard,
@@ -28,6 +32,7 @@ import {
 
 interface MessageItemProps {
   message: ChatMessage;
+  theme?: 'dark' | 'light';
   isLastAssistant: boolean;
   showFollowUps: boolean;
   quotaMultiplier: number;
@@ -56,6 +61,7 @@ function getSearchStageLabel(stage: string, sourcesCount: number, pagesRead?: nu
 
 export function MessageItem({
   message,
+  theme = 'dark',
   isLastAssistant,
   showFollowUps,
   quotaMultiplier,
@@ -164,18 +170,61 @@ export function MessageItem({
           <>
             {message.attachments && message.attachments.length > 0 && (
               <div className="flex flex-wrap justify-end gap-2 max-w-[85%] sm:max-w-[75%]">
-                {message.attachments.map((att) => (
-                  <div
-                    key={att.id}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700/70 text-xs text-zinc-700 dark:text-zinc-300"
-                  >
-                    <FileText className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                    <span className="truncate max-w-[180px]">{att.name}</span>
-                    <span className="text-zinc-400 tabular-nums">
-                      · {(att.size / 1024).toFixed(1)} KB
-                    </span>
-                  </div>
-                ))}
+                {message.attachments.map((att) => {
+                  const previewArt = attachmentToPreviewArtifact(att);
+                  if (att.kind === 'image' && att.previewUrl) {
+                    return (
+                      <button
+                        key={att.id}
+                        type="button"
+                        onClick={() => previewArt && onPreviewArtifact(previewArt)}
+                        title={`Preview ${att.name}`}
+                        className="group/att overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700/80 bg-zinc-50 dark:bg-zinc-900 text-left cursor-zoom-in"
+                      >
+                        <img
+                          src={att.previewUrl}
+                          alt={att.name}
+                          className="max-h-48 max-w-[260px] object-contain bg-white dark:bg-[#141416]"
+                        />
+                        <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 border-t border-zinc-200 dark:border-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-300">
+                          <span className="truncate max-w-[160px]">{att.name}</span>
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            Preview
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  }
+                  return (
+                    <div
+                      key={att.id}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-100 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700/70 text-xs text-zinc-700 dark:text-zinc-300"
+                    >
+                      {att.kind === 'audio' ? (
+                        <FileAudio className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      ) : att.kind === 'video' ? (
+                        <FileVideo className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      ) : (
+                        <FileText className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                      )}
+                      <span className="truncate max-w-[180px]">{att.name}</span>
+                      <span className="text-zinc-400 tabular-nums">
+                        · {(att.size / 1024).toFixed(1)} KB
+                      </span>
+                      {previewArt && (
+                        <button
+                          type="button"
+                          onClick={() => onPreviewArtifact(previewArt)}
+                          title="Open preview"
+                          className="ml-1 inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 hover:underline"
+                        >
+                          <Eye className="w-3 h-3" />
+                          <span>Preview</span>
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -311,6 +360,7 @@ export function MessageItem({
                     href={src.url}
                     target="_blank"
                     rel="noopener noreferrer"
+                    title={src.snippet || src.url}
                     className="group/src flex items-start justify-between gap-2 p-2 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/80 hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors"
                   >
                     <div className="min-w-0">
@@ -381,6 +431,8 @@ export function MessageItem({
             {message.content ? (
               <MarkdownRenderer
                 content={message.content}
+                theme={theme}
+                sources={message.sources}
                 onPreviewArtifact={onPreviewArtifact}
               />
             ) : message.isStreaming ? (

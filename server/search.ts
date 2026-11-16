@@ -137,8 +137,17 @@ export function extractUrlsFromText(text: string): string[] {
   return valid;
 }
 
+export function extractUserQuestionForSearch(raw: string): string {
+  // Remove attached file/media blocks prepended by buildApiMessageContent
+  const cleaned = raw
+    .replace(/\[Attached file:[^\]]+\]\s*```[\s\S]*?```/gi, " ")
+    .replace(/\[Attached (?:image|audio|video):[^\]]+\]/gi, " ")
+    .trim();
+  return cleaned || raw;
+}
+
 export function sanitizeSearchQuery(raw: string): string {
-  let text = raw
+  let text = extractUserQuestionForSearch(raw)
     .replace(/https?:\/\/\S+/g, " ")
     .replace(/[\r\n]+/g, " ")
     .trim();
@@ -162,11 +171,11 @@ export function sanitizeSearchQuery(raw: string): string {
     .trim();
 
   const words = text.split(" ").filter(Boolean);
-  if (words.length > 12) {
-    text = words.slice(0, 12).join(" ");
+  if (words.length > 14) {
+    text = words.slice(0, 14).join(" ");
   }
 
-  return text.slice(0, 140).trim() || raw.slice(0, 120).trim();
+  return text.slice(0, 160).trim() || raw.slice(0, 120).trim();
 }
 
 export async function searchDuckDuckGoLite(
@@ -210,7 +219,7 @@ export async function searchDuckDuckGoLite(
 
   const snippets: Array<{ text: string; index: number }> = [];
   while ((m = snippetRegex.exec(html)) !== null) {
-    snippets.push({ text: stripTags(m[1]).slice(0, 420), index: m.index });
+    snippets.push({ text: stripTags(m[1]).slice(0, 480), index: m.index });
   }
 
   return links.slice(0, 8).map((link, idx) => {
@@ -276,7 +285,7 @@ export async function searchDuckDuckGoHtml(
           title: title.slice(0, 180),
           url,
           domain: getDomain(url),
-          snippet: snippet.slice(0, 420),
+          snippet: snippet.slice(0, 480),
         });
 
         if (results.length >= 8) break;
@@ -293,6 +302,74 @@ export async function searchDuckDuckGoHtml(
   return searchDuckDuckGoLite(query, recency, signal).catch(() => []);
 }
 
+export async function searchDuckDuckGoInstant(
+  query: string,
+  signal?: AbortSignal,
+): Promise<SearchSource[]> {
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      format: "json",
+      no_html: "1",
+      skip_disambig: "1",
+    });
+    const res = await fetch(
+      `https://api.duckduckgo.com/?${params.toString()}`,
+      {
+        headers: { "User-Agent": "AshutoshGPT/1.0" },
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(4500)])
+          : AbortSignal.timeout(4500),
+      },
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      Heading?: string;
+      AbstractText?: string;
+      AbstractURL?: string;
+      Results?: Array<{ FirstURL?: string; Text?: string }>;
+      RelatedTopics?: Array<{ FirstURL?: string; Text?: string }>;
+    };
+    const out: SearchSource[] = [];
+    if (data.AbstractURL && data.AbstractText) {
+      const safe = normalizeUrl(data.AbstractURL);
+      if (safe) {
+        out.push({
+          title: data.Heading || getDomain(safe),
+          url: safe,
+          domain: getDomain(safe),
+          snippet: data.AbstractText.slice(0, 500),
+        });
+      }
+    }
+    for (const item of data.Results || []) {
+      if (!item.FirstURL || !item.Text) continue;
+      const safe = normalizeUrl(item.FirstURL);
+      if (!safe) continue;
+      out.push({
+        title: item.Text.slice(0, 160),
+        url: safe,
+        domain: getDomain(safe),
+        snippet: item.Text.slice(0, 420),
+      });
+    }
+    for (const item of (data.RelatedTopics || []).slice(0, 3)) {
+      if (!item.FirstURL || !item.Text) continue;
+      const safe = normalizeUrl(item.FirstURL);
+      if (!safe) continue;
+      out.push({
+        title: item.Text.split(" - ")[0]?.slice(0, 160) || getDomain(safe),
+        url: safe,
+        domain: getDomain(safe),
+        snippet: item.Text.slice(0, 420),
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export async function searchWikipedia(
   query: string,
   signal?: AbortSignal,
@@ -300,9 +377,13 @@ export async function searchWikipedia(
   try {
     const params = new URLSearchParams({
       action: "query",
-      list: "search",
-      srsearch: query,
-      srlimit: "4",
+      generator: "search",
+      gsrsearch: query,
+      gsrlimit: "4",
+      prop: "extracts",
+      exintro: "1",
+      explaintext: "1",
+      exchars: "700",
       format: "json",
     });
     const res = await fetch(
@@ -316,10 +397,17 @@ export async function searchWikipedia(
     );
     if (!res.ok) return [];
     const data = (await res.json()) as {
-      query?: { search?: Array<{ title: string; snippet: string }> };
+      query?: {
+        pages?: Record<
+          string,
+          { index?: number; title: string; extract?: string }
+        >;
+      };
     };
-    const items = data?.query?.search || [];
-    return items.map((item) => {
+    const pages = Object.values(data?.query?.pages || {}).sort(
+      (a, b) => (a.index ?? 99) - (b.index ?? 99),
+    );
+    return pages.map((item) => {
       const url = `https://en.wikipedia.org/wiki/${encodeURIComponent(
         item.title.replace(/ /g, "_"),
       )}`;
@@ -327,7 +415,7 @@ export async function searchWikipedia(
         title: `${item.title} — Wikipedia`,
         url,
         domain: "en.wikipedia.org",
-        snippet: stripTags(item.snippet).slice(0, 420),
+        snippet: (item.extract || "").replace(/\s+/g, " ").trim().slice(0, 560),
       };
     });
   } catch {
@@ -335,9 +423,60 @@ export async function searchWikipedia(
   }
 }
 
+export async function searchHackerNews(
+  query: string,
+  signal?: AbortSignal,
+): Promise<SearchSource[]> {
+  try {
+    const params = new URLSearchParams({
+      query,
+      tags: "story",
+      hitsPerPage: "4",
+    });
+    const res = await fetch(
+      `https://hn.algolia.com/api/v1/search?${params.toString()}`,
+      {
+        headers: { "User-Agent": "AshutoshGPT/1.0" },
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(4500)])
+          : AbortSignal.timeout(4500),
+      },
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      hits?: Array<{
+        title?: string;
+        url?: string;
+        objectID?: string;
+        points?: number;
+        num_comments?: number;
+      }>;
+    };
+    const results: SearchSource[] = [];
+    for (const hit of data.hits || []) {
+      const targetUrl =
+        hit.url ||
+        (hit.objectID
+          ? `https://news.ycombinator.com/item?id=${hit.objectID}`
+          : "");
+      const safe = targetUrl ? normalizeUrl(targetUrl) : null;
+      if (!safe || !hit.title) continue;
+      results.push({
+        title: hit.title.slice(0, 180),
+        url: safe,
+        domain: getDomain(safe),
+        snippet: `Discussion on Hacker News (${hit.points ?? 0} points, ${hit.num_comments ?? 0} comments).`,
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchPageExcerpt(
   url: string,
-  maxChars = 3000,
+  maxChars = 3600,
   signal?: AbortSignal,
 ): Promise<{ title?: string; excerpt: string } | null> {
   const safeUrl = normalizeUrl(url);
@@ -351,8 +490,8 @@ export async function fetchPageExcerpt(
       },
       redirect: "follow",
       signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(4800)])
-        : AbortSignal.timeout(4800),
+        ? AbortSignal.any([signal, AbortSignal.timeout(5200)])
+        : AbortSignal.timeout(5200),
     });
     if (!res.ok) return null;
 
@@ -380,12 +519,18 @@ export async function fetchPageExcerpt(
     const titleMatch = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     const title = titleMatch ? stripTags(titleMatch[1]).slice(0, 180) : undefined;
 
-    const cleanedHtml = raw
+    // Prefer <main> or <article> region if substantive prose is found inside it
+    const mainMatch = raw.match(/<(?:main|article)\b[^>]*>([\s\S]*?)<\/(?:main|article)>/i);
+    const candidateHtml =
+      mainMatch && stripTags(mainMatch[1]).length > 260 ? mainMatch[1] : raw;
+
+    const cleanedHtml = candidateHtml
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
       .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
       .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
       .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+      .replace(/<aside[\s\S]*?<\/aside>/gi, " ")
       .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
       .replace(/<header[\s\S]*?<\/header>/gi, " ");
 
@@ -401,12 +546,36 @@ export async function fetchPageExcerpt(
   }
 }
 
-function deduplicateSources(sources: SearchSource[], limit: number): SearchSource[] {
+function rankAndDeduplicateSources(
+  sources: SearchSource[],
+  baseQuery: string,
+  limit: number,
+): SearchSource[] {
+  const queryTerms = baseQuery
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length >= 3);
+
+  const scored = sources.map((s, idx) => {
+    const hay = `${s.title} ${s.snippet} ${s.domain}`.toLowerCase();
+    let score = 0;
+    for (const term of queryTerms) {
+      if (hay.includes(term)) score += 2;
+      if (s.title.toLowerCase().includes(term)) score += 1;
+    }
+    if (s.snippet.length > 80) score += 1.5;
+    // Slight preference for preserving earlier primary hits on tie
+    score += Math.max(0, 1 - idx * 0.03);
+    return { source: s, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
   const seenUrls = new Set<string>();
   const domainCounts = new Map<string, number>();
   const result: SearchSource[] = [];
 
-  for (const s of sources) {
+  for (const { source: s } of scored) {
     const key = s.url.replace(/\/$/, "");
     if (seenUrls.has(key)) continue;
     const count = domainCounts.get(s.domain) ?? 0;
@@ -432,8 +601,9 @@ export async function runWebSearchPipeline(options: {
 }> {
   const { userQuery, mode, recency, planQueriesFn, onProgress, signal } =
     options;
-  const baseQuery = sanitizeSearchQuery(userQuery);
-  const directUrls = extractUrlsFromText(userQuery);
+  const cleanQuestion = extractUserQuestionForSearch(userQuery);
+  const baseQuery = sanitizeSearchQuery(cleanQuestion);
+  const directUrls = extractUrlsFromText(cleanQuestion);
 
   let queries: string[] = [baseQuery];
 
@@ -470,8 +640,17 @@ export async function runWebSearchPipeline(options: {
   for (const q of queries) {
     searchTasks.push(searchDuckDuckGoHtml(q, recency, signal).catch(() => []));
   }
+  searchTasks.push(searchDuckDuckGoInstant(baseQuery, signal).catch(() => []));
   if (mode === "deep" || directUrls.length === 0) {
     searchTasks.push(searchWikipedia(baseQuery, signal).catch(() => []));
+  }
+  if (
+    mode === "deep" ||
+    /\b(react|node|typescript|javascript|python|rust|sql|sqlite|postgres|ai|llm|api|code|bug|framework|library|github|open[- ]source)\b/i.test(
+      baseQuery,
+    )
+  ) {
+    searchTasks.push(searchHackerNews(baseQuery, signal).catch(() => []));
   }
 
   const searchBatches = await Promise.all(searchTasks);
@@ -490,10 +669,11 @@ export async function runWebSearchPipeline(options: {
   }
 
   const maxSources = mode === "deep" ? 10 : 6;
-  const sources = deduplicateSources(rawSources, maxSources);
+  const sources = rankAndDeduplicateSources(rawSources, baseQuery, maxSources);
 
   // Read full page excerpts for top sources (more in Deep Search)
-  const readCount = mode === "deep" ? Math.min(5, sources.length) : Math.min(2, sources.length);
+  const readCount =
+    mode === "deep" ? Math.min(6, sources.length) : Math.min(3, sources.length);
   if (readCount > 0) {
     onProgress?.({
       stage: "reading",
@@ -512,7 +692,7 @@ export async function runWebSearchPipeline(options: {
     const pagesToRead = sources.slice(0, readCount);
     const excerpts = await Promise.all(
       pagesToRead.map((s) =>
-        fetchPageExcerpt(s.url, mode === "deep" ? 3200 : 1800, signal),
+        fetchPageExcerpt(s.url, mode === "deep" ? 3600 : 2200, signal),
       ),
     );
 
@@ -569,7 +749,7 @@ export function formatSourcesForSystemPrompt(
     return [
       `Today's date (UTC): ${today}.`,
       `Live ${mode === "deep" ? "Deep Search" : "Web Search"} ran for queries: ${queries.join(" | ")}.`,
-      `No live web results were retrieved. Be transparent about that and answer carefully from your knowledge without fabricating URLs.`,
+      `No live web results were retrieved. Be transparent about that and answer carefully from your verified knowledge without fabricating URLs.`,
     ].join("\n");
   }
 
@@ -586,16 +766,17 @@ export function formatSourcesForSystemPrompt(
   const instructions =
     mode === "deep"
       ? `You are Ashutosh GPT in Deep Search mode. Today's date (UTC) is ${today}.
-Synthesize a thorough, well-structured, multi-angle research response grounded in the live web sources below.
+Synthesize an authoritative, clear, multi-angle research response grounded in the live web sources below.
 Rules:
-- Cite sources inline using bracketed numbers like [1], [2], matching the source list below.
-- Cross-check facts across sources, highlight consensus vs. nuances or caveats, and organize with clear headings and concise bullet points or tables where helpful.
-- Never invent citations or URLs not present in the sources below.`
+- Open with a crisp 2-3 sentence direct summary answering the core question.
+- Organize supporting analysis with clean headings, concrete numbers/facts, markdown comparison tables when weighing options, and caveats where sources differ.
+- Cite supporting claims inline using standalone bracketed source numbers like [1] or [2] matching the numbered sources below (never invent source numbers or URLs).`
       : `You are Ashutosh GPT with live Web Search enabled. Today's date (UTC) is ${today}.
-Answer accurately using the live web sources below.
+Answer clearly and accurately using the live web sources below.
 Rules:
-- Cite supporting claims inline using bracketed numbers like [1], [2] matching the sources below.
-- Keep the answer clear, current, and well-formatted. Never fabricate URLs.`;
+- Lead with the direct answer, followed by scannable supporting points.
+- Cite supporting claims inline using standalone bracketed numbers like [1] or [2] matching the sources below.
+- Never fabricate URLs or facts not supported by the sources or verified knowledge.`;
 
   return `${instructions}\n\nSearch queries executed: ${queries.join(" | ")}\n\nLIVE WEB SOURCES:\n\n${formattedSources}`;
 }

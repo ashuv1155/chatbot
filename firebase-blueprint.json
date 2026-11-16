@@ -300,6 +300,42 @@
         "status",
         "createdAt"
       ]
+    },
+    "SystemKeyPoolDoc": {
+      "title": "SystemKeyPoolDoc",
+      "description": "Server-encrypted admin API key pool persisted for multi-instance and serverless execution",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Configuration document ID ('keyPool')",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "encryptedPayload": {
+          "type": "string",
+          "description": "AES-256-GCM encrypted server-only payload containing custom API keys",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "keyCount": {
+          "type": "integer",
+          "description": "Number of custom admin-added API keys stored"
+        },
+        "updatedBy": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified admin email that last updated the key pool",
+          "maxLength": 254
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the key pool was last persisted"
+        }
+      },
+      "required": ["id", "encryptedPayload", "keyCount", "updatedBy", "updatedAt"]
     }
   },
   "firestore": {
@@ -318,6 +354,10 @@
     "/usageLogs/{logId}": {
       "schema": { "$ref": "#/entities/UsageLogDoc" },
       "description": "Immutable per-request token usage logs for admin analytics and user audit"
+    },
+    "/systemConfig/{configId}": {
+      "schema": { "$ref": "#/entities/SystemKeyPoolDoc" },
+      "description": "Encrypted server-managed configuration documents (read-only for authenticated runtime hydration, writable exclusively by admin)"
     }
   }
 }

@@ -1,8 +1,17 @@
+export type AttachmentKind = 'text' | 'image' | 'audio' | 'video';
+
 export interface Attachment {
   id: string;
   name: string;
   size: number;
   content: string;
+  mimeType?: string;
+  kind?: AttachmentKind;
+  previewUrl?: string;
+  dimensions?: {
+    width: number;
+    height: number;
+  };
 }
 
 export interface TokenUsage {
@@ -75,11 +84,27 @@ export interface ChatSettings {
   showFollowUps: boolean;
 }
 
+export type PreviewArtifactKind =
+  | 'html'
+  | 'svg'
+  | 'react'
+  | 'mermaid'
+  | 'markdown'
+  | 'csv'
+  | 'json'
+  | 'css'
+  | 'javascript'
+  | 'image'
+  | 'audio'
+  | 'video';
+
 export interface PreviewArtifact {
   id: string;
-  language: 'html' | 'svg';
+  language: PreviewArtifactKind;
   code: string;
   title: string;
+  mimeType?: string;
+  filename?: string;
 }
 
 export interface ModelPricingInfo {

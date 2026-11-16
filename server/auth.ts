@@ -13,25 +13,46 @@ export interface VerifiedUser {
   picture: string;
 }
 
-function resolveFirebaseProjectId(): string {
-  if (process.env.FIREBASE_PROJECT_ID) {
-    return process.env.FIREBASE_PROJECT_ID.trim();
-  }
+function loadAppletFirebaseConfig(): {
+  projectId: string;
+  firestoreDatabaseId: string;
+} {
+  let projectId = "gen-lang-client-0737333490";
+  let firestoreDatabaseId = "(default)";
   try {
     const cfgPath = path.resolve(process.cwd(), "firebase-applet-config.json");
     if (fs.existsSync(cfgPath)) {
       const parsed = JSON.parse(fs.readFileSync(cfgPath, "utf8")) as {
         projectId?: string;
+        firestoreDatabaseId?: string;
       };
-      if (parsed.projectId) return parsed.projectId;
+      if (parsed.projectId) projectId = parsed.projectId;
+      if (parsed.firestoreDatabaseId) {
+        firestoreDatabaseId = parsed.firestoreDatabaseId;
+      }
     }
   } catch {
-    // Fallback below
+    // Fallback to defaults
   }
-  return "gen-lang-client-0737333490";
+  return {
+    projectId: process.env.FIREBASE_PROJECT_ID?.trim() || projectId,
+    firestoreDatabaseId:
+      process.env.FIREBASE_DATABASE_ID?.trim() || firestoreDatabaseId,
+  };
 }
 
-const FIREBASE_PROJECT_ID = resolveFirebaseProjectId();
+const FIREBASE_REST_CONFIG = loadAppletFirebaseConfig();
+const FIREBASE_PROJECT_ID = FIREBASE_REST_CONFIG.projectId;
+
+export function getFirebaseRestConfig(): {
+  projectId: string;
+  databaseId: string;
+} {
+  return {
+    projectId: FIREBASE_REST_CONFIG.projectId,
+    databaseId: FIREBASE_REST_CONFIG.firestoreDatabaseId,
+  };
+}
 const GOOGLE_CERTS_URL =
   "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
 

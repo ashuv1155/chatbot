@@ -72,7 +72,7 @@ import {
   updateUserMessageContentInFirestore,
 } from './lib/firebase';
 import { getAuthHeaders, isAdminUser } from './lib/admin';
-import { downloadFile, readFileAsText } from './lib/browser';
+import { downloadFile, processUploadedFile } from './lib/browser';
 import { SSEChunkParser } from './lib/sse';
 import { Sidebar } from './components/Sidebar';
 import { MessageItem } from './components/MessageItem';
@@ -127,15 +127,24 @@ function buildApiMessageContent(
   attachments?: Attachment[],
 ): string {
   if (!attachments || attachments.length === 0) return content;
-  const withContent = attachments.filter((att) => att.content.length > 0);
-  if (withContent.length === 0) return content;
-  const fileBlocks = withContent
-    .map(
-      (att) =>
-        `[Attached file: ${att.name}]\n\`\`\`\n${att.content}\n\`\`\``,
-    )
-    .join('\n\n');
-  return content ? `${fileBlocks}\n\n${content}` : fileBlocks;
+  const blocks = attachments
+    .map((att) => {
+      if (att.content.length > 0) {
+        return `[Attached file: ${att.name}]\n\`\`\`\n${att.content}\n\`\`\``;
+      }
+      if (att.kind === 'image' || att.kind === 'audio' || att.kind === 'video') {
+        const dims = att.dimensions
+          ? ` · ${att.dimensions.width}x${att.dimensions.height}`
+          : '';
+        const mime = att.mimeType ? ` · ${att.mimeType}` : '';
+        return `[Attached ${att.kind}: ${att.name}${mime}${dims} · ${(att.size / 1024).toFixed(1)} KB]`;
+      }
+      return '';
+    })
+    .filter(Boolean);
+  if (blocks.length === 0) return content;
+  const joined = blocks.join('\n\n');
+  return content ? `${joined}\n\n${content}` : joined;
 }
 
 function formatApiError(status: number, body: unknown): string {
@@ -180,7 +189,6 @@ export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => loadTheme());
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [guestMode, setGuestMode] = useState(false);
 
   const [localConversations, setLocalConversations] = useState<Conversation[]>(
     () => loadConversations(),
@@ -308,7 +316,6 @@ export default function App() {
       setAuthReady(true);
       lastSyncedConvCountRef.current = null;
       if (nextUser) {
-        setGuestMode(false);
         syncUserProfile(nextUser).catch(() => {});
       } else {
         setCloudConversations([]);
@@ -419,11 +426,7 @@ export default function App() {
   }, [setActiveId]);
 
   const handleSidebarSignIn = useCallback(async () => {
-    try {
-      await signInWithGoogle();
-    } catch {
-      setGuestMode(false);
-    }
+    await signInWithGoogle();
   }, []);
 
   const handleSignOut = useCallback(async () => {
@@ -433,7 +436,6 @@ export default function App() {
     await signOutUser();
     setCloudActiveId(null);
     setPreviewArtifact(null);
-    setGuestMode(false);
   }, []);
 
   // Global cross-browser keyboard shortcuts
@@ -1310,18 +1312,8 @@ export default function App() {
 
     const loaded: Attachment[] = [];
     for (const file of Array.from(files)) {
-      if (file.size > 1_500_000) continue;
-      try {
-        const text = await readFileAsText(file);
-        loaded.push({
-          id: createId(),
-          name: file.name,
-          size: file.size,
-          content: text,
-        });
-      } catch {
-        // Ignore unreadable binary files
-      }
+      const processed = await processUploadedFile(file, createId());
+      if (processed) loaded.push(processed);
     }
     if (loaded.length > 0) {
       setAttachments((prev) => [...prev, ...loaded]);
@@ -1356,13 +1348,15 @@ export default function App() {
     );
   }
 
-  if (!user && !guestMode) {
+  if (!user) {
     return (
       <LoginScreen
         onGoogleSignIn={async () => {
           await signInWithGoogle();
         }}
-        onContinueAsGuest={() => setGuestMode(true)}
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+        quota={quota}
       />
     );
   }
@@ -1410,10 +1404,10 @@ export default function App() {
           <div className="absolute inset-3 z-30 rounded-2xl border-2 border-dashed border-emerald-500 bg-emerald-50/90 dark:bg-emerald-950/80 backdrop-blur-[2px] flex flex-col items-center justify-center gap-2 pointer-events-none">
             <Upload className="w-8 h-8 text-emerald-600 dark:text-emerald-400" />
             <p className="text-sm font-medium text-emerald-900 dark:text-emerald-100">
-              Drop text or code files to attach
+              Drop images, media, code, or text files to attach
             </p>
             <p className="text-xs text-emerald-700 dark:text-emerald-300">
-              Up to 1.5 MB per file · 198K context window
+              Supports PNG/JPG/SVG/WebP, MP3/WAV/MP4/WebM, code &amp; data files
             </p>
           </div>
         )}
@@ -1582,6 +1576,7 @@ export default function App() {
                 onRemoveAttachment={(id) =>
                   setAttachments((prev) => prev.filter((a) => a.id !== id))
                 }
+                onPreviewArtifact={(artifact) => setPreviewArtifact(artifact)}
                 onSend={() => handleSend()}
                 onStop={handleStop}
                 isStreaming={isStreamingActive}
@@ -1632,6 +1627,7 @@ export default function App() {
                   <MessageItem
                     key={msg.id}
                     message={msg}
+                    theme={theme}
                     isLastAssistant={msg.id === lastAssistantId}
                     showFollowUps={settings.showFollowUps}
                     quotaMultiplier={quotaMultiplier}
@@ -1678,6 +1674,7 @@ export default function App() {
                 onRemoveAttachment={(id) =>
                   setAttachments((prev) => prev.filter((a) => a.id !== id))
                 }
+                onPreviewArtifact={(artifact) => setPreviewArtifact(artifact)}
                 onSend={() => handleSend()}
                 onStop={handleStop}
                 isStreaming={isStreamingActive}
@@ -1698,6 +1695,7 @@ export default function App() {
 
       <ArtifactPreview
         artifact={previewArtifact}
+        theme={theme}
         onClose={() => setPreviewArtifact(null)}
       />
 

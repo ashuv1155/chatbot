@@ -3,12 +3,16 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ClipboardEvent,
   type KeyboardEvent,
 } from 'react';
 import {
   ArrowUp,
   Compass,
+  Eye,
+  FileAudio,
   FileText,
+  FileVideo,
   Globe,
   Mic,
   MicOff,
@@ -20,6 +24,7 @@ import {
 } from 'lucide-react';
 import type {
   Attachment,
+  PreviewArtifact,
   ResponseStyle,
   ResponseTone,
   SearchMode,
@@ -28,10 +33,11 @@ import type {
 import { estimateTokens, formatCompactNumber } from '../lib/storage';
 import {
   createSpeechRecognition,
-  readFileAsText,
+  processUploadedFile,
   supportsSpeechRecognition,
   type SpeechRecognitionInstance,
 } from '../lib/browser';
+import { attachmentToPreviewArtifact } from '../lib/previews';
 
 interface ComposerProps {
   value: string;
@@ -39,6 +45,7 @@ interface ComposerProps {
   attachments: Attachment[];
   onAddAttachments: (files: Attachment[]) => void;
   onRemoveAttachment: (id: string) => void;
+  onPreviewArtifact?: (artifact: PreviewArtifact) => void;
   onSend: () => void;
   onStop: () => void;
   isStreaming: boolean;
@@ -115,9 +122,45 @@ const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     command: '/html',
-    label: 'Build live HTML/SVG preview',
+    label: 'Build live HTML/CSS/JS preview',
     template:
       'Create a self-contained single-file HTML/CSS/JS snippet in an ```html code block for:\n\n',
+  },
+  {
+    command: '/svg',
+    label: 'Generate vector SVG visual preview',
+    template:
+      'Design a detailed, crisp vector graphic with explicit viewBox and clean geometry inside an ```svg code block for:\n\n',
+  },
+  {
+    command: '/react',
+    label: 'Build interactive React component preview',
+    template:
+      'Build a self-contained interactive React component using Tailwind classes (export default function App) inside a ```tsx code block for:\n\n',
+  },
+  {
+    command: '/diagram',
+    label: 'Generate Mermaid diagram preview',
+    template:
+      'Create a clear Mermaid diagram inside a ```mermaid code block illustrating:\n\n',
+  },
+  {
+    command: '/chart',
+    label: 'Build interactive HTML Canvas/SVG chart',
+    template:
+      'Create an interactive HTML data visualization with clean responsive SVG/Canvas rendering inside an ```html code block for:\n\n',
+  },
+  {
+    command: '/audio',
+    label: 'Build interactive Web Audio media widget',
+    template:
+      'Create an interactive Web Audio synthesizer or media player with play/pause and visual waveform inside an ```html code block for:\n\n',
+  },
+  {
+    command: '/csv',
+    label: 'Generate structured CSV table preview',
+    template:
+      'Generate structured tabular data inside a ```csv code block for:\n\n',
   },
   {
     command: '/email',
@@ -155,7 +198,7 @@ const RECENCY_OPTIONS: Array<{ value: SearchRecency; label: string }> = [
 ];
 
 const ACCEPTED_EXTENSIONS =
-  '.txt,.md,.markdown,.json,.csv,.tsv,.ts,.tsx,.js,.jsx,.py,.go,.rs,.java,.c,.cpp,.h,.css,.html,.xml,.yaml,.yml,.sql,.sh,.env,.log,.toml';
+  'image/*,audio/*,video/*,.png,.jpg,.jpeg,.gif,.webp,.svg,.mp3,.wav,.ogg,.m4a,.mp4,.webm,.txt,.md,.markdown,.json,.csv,.tsv,.ts,.tsx,.js,.jsx,.py,.go,.rs,.java,.c,.cpp,.h,.css,.html,.xml,.yaml,.yml,.sql,.sh,.env,.log,.toml,.mermaid,.mmd';
 
 export function Composer({
   value,
@@ -163,6 +206,7 @@ export function Composer({
   attachments,
   onAddAttachments,
   onRemoveAttachment,
+  onPreviewArtifact,
   onSend,
   onStop,
   isStreaming,
@@ -288,23 +332,40 @@ export function Composer({
 
     const loaded: Attachment[] = [];
     for (const file of Array.from(files)) {
-      if (file.size > 1_500_000) continue;
-      try {
-        const text = await readFileAsText(file);
-        loaded.push({
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          name: file.name,
-          size: file.size,
-          content: text,
-        });
-      } catch {
-        // Ignore unreadable binary files
-      }
+      const processed = await processUploadedFile(
+        file,
+        `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      );
+      if (processed) loaded.push(processed);
     }
     if (loaded.length > 0) {
       onAddAttachments(loaded);
     }
     e.target.value = '';
+  };
+
+  const handlePaste = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items || items.length === 0) return;
+    const mediaFiles: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind === 'file') {
+        const f = item.getAsFile();
+        if (f) mediaFiles.push(f);
+      }
+    }
+    if (mediaFiles.length === 0) return;
+    const loaded: Attachment[] = [];
+    for (const file of mediaFiles) {
+      const processed = await processUploadedFile(
+        file,
+        `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      );
+      if (processed) loaded.push(processed);
+    }
+    if (loaded.length > 0) {
+      onAddAttachments(loaded);
+    }
   };
 
   const toggleVoiceInput = () => {
@@ -514,26 +575,61 @@ export function Composer({
       <div className="rounded-2xl border border-zinc-200 dark:border-zinc-700/80 bg-zinc-50 dark:bg-[#212124] shadow-sm focus-within:border-zinc-400 dark:focus-within:border-zinc-500 transition-colors">
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3.5 pt-3">
-            {attachments.map((att) => (
-              <div
-                key={att.id}
-                className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-xs text-zinc-700 dark:text-zinc-200"
-              >
-                <FileText className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                <span className="truncate max-w-[160px]">{att.name}</span>
-                <span className="text-zinc-400 tabular-nums">
-                  {(att.size / 1024).toFixed(1)}KB
-                </span>
-                <button
-                  type="button"
-                  onClick={() => onRemoveAttachment(att.id)}
-                  aria-label={`Remove ${att.name}`}
-                  className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100 transition-colors"
+            {attachments.map((att) => {
+              const previewArt = attachmentToPreviewArtifact(att);
+              return (
+                <div
+                  key={att.id}
+                  className="inline-flex items-center gap-2 p-1.5 pr-2.5 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-xs text-zinc-700 dark:text-zinc-200"
                 >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ))}
+                  {att.kind === 'image' && att.previewUrl ? (
+                    <button
+                      type="button"
+                      onClick={() => previewArt && onPreviewArtifact?.(previewArt)}
+                      title="Preview image"
+                      className="w-8 h-8 rounded overflow-hidden border border-zinc-200 dark:border-zinc-700 shrink-0 cursor-zoom-in"
+                    >
+                      <img
+                        src={att.previewUrl}
+                        alt={att.name}
+                        className="w-full h-full object-cover"
+                      />
+                    </button>
+                  ) : att.kind === 'audio' ? (
+                    <FileAudio className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 ml-1" />
+                  ) : att.kind === 'video' ? (
+                    <FileVideo className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 ml-1" />
+                  ) : (
+                    <FileText className="w-3.5 h-3.5 text-zinc-500 shrink-0 ml-1" />
+                  )}
+
+                  <span className="truncate max-w-[150px]">{att.name}</span>
+                  <span className="text-zinc-400 tabular-nums">
+                    {(att.size / 1024).toFixed(1)}KB
+                  </span>
+
+                  {previewArt && onPreviewArtifact && (
+                    <button
+                      type="button"
+                      onClick={() => onPreviewArtifact(previewArt)}
+                      title="Open preview"
+                      className="text-emerald-600 dark:text-emerald-400 hover:opacity-80 transition-opacity"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => onRemoveAttachment(att.id)}
+                    aria-label={`Remove ${att.name}`}
+                    className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100 transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -542,6 +638,7 @@ export function Composer({
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           rows={1}
           placeholder={placeholderText}
           aria-label="Message input"
@@ -561,7 +658,7 @@ export function Composer({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              title="Attach text, code, markdown, or CSV files"
+              title="Attach images, audio, video, code, or text files"
               className="inline-flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0"
             >
               <Paperclip className="w-4 h-4" />

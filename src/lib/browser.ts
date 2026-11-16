@@ -1,3 +1,5 @@
+import type { Attachment } from '../types/chat';
+
 export async function copyToClipboard(text: string): Promise<boolean> {
   if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
     try {
@@ -40,6 +42,129 @@ export function readFileAsText(file: File): Promise<string> {
   });
 }
 
+export function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+export function getImageDimensions(
+  src: string,
+): Promise<{ width: number; height: number } | undefined> {
+  return new Promise((resolve) => {
+    if (typeof Image === 'undefined') {
+      resolve(undefined);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+        resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      } else {
+        resolve(undefined);
+      }
+    };
+    img.onerror = () => resolve(undefined);
+    img.src = src;
+  });
+}
+
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg)$/i;
+const AUDIO_EXT_RE = /\.(mp3|wav|ogg|m4a|aac|flac|opus)$/i;
+const VIDEO_EXT_RE = /\.(mp4|webm|mov|ogv|m4v)$/i;
+
+export async function processUploadedFile(
+  file: File,
+  id: string,
+): Promise<Attachment | null> {
+  const mime = (file.type || '').toLowerCase();
+  const name = file.name || 'attachment';
+
+  const isSvg = mime === 'image/svg+xml' || /\.svg$/i.test(name);
+  const isImage = !isSvg && (mime.startsWith('image/') || IMAGE_EXT_RE.test(name));
+  const isAudio = mime.startsWith('audio/') || AUDIO_EXT_RE.test(name);
+  const isVideo = mime.startsWith('video/') || VIDEO_EXT_RE.test(name);
+
+  if (isSvg) {
+    if (file.size > 1_500_000) return null;
+    try {
+      const [content, previewUrl] = await Promise.all([
+        readFileAsText(file),
+        readFileAsDataUrl(file),
+      ]);
+      const dimensions = await getImageDimensions(previewUrl);
+      return {
+        id,
+        name,
+        size: file.size,
+        content,
+        mimeType: 'image/svg+xml',
+        kind: 'image',
+        previewUrl,
+        dimensions,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  if (isImage) {
+    if (file.size > 4_000_000) return null;
+    try {
+      const previewUrl = await readFileAsDataUrl(file);
+      const dimensions = await getImageDimensions(previewUrl);
+      return {
+        id,
+        name,
+        size: file.size,
+        content: '',
+        mimeType: mime || 'image/png',
+        kind: 'image',
+        previewUrl,
+        dimensions,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  if (isAudio || isVideo) {
+    if (file.size > 8_000_000) return null;
+    try {
+      const previewUrl = await readFileAsDataUrl(file);
+      return {
+        id,
+        name,
+        size: file.size,
+        content: '',
+        mimeType: mime || (isAudio ? 'audio/mpeg' : 'video/mp4'),
+        kind: isAudio ? 'audio' : 'video',
+        previewUrl,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  if (file.size > 1_500_000) return null;
+  try {
+    const content = await readFileAsText(file);
+    return {
+      id,
+      name,
+      size: file.size,
+      content,
+      mimeType: mime || 'text/plain',
+      kind: 'text',
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function downloadFile(
   filename: string,
   content: string,
@@ -56,6 +181,18 @@ export function downloadFile(
   document.body.removeChild(a);
   // Delay revocation so Firefox and Safari finish reading the blob URL
   setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+export function downloadUrl(filename: string, url: string): void {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 export interface SpeechRecognitionInstance {

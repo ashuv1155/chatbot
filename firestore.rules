@@ -215,6 +215,24 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidSystemKeyPool(data, configId) {
+      return data.keys().hasAll(['id', 'encryptedPayload', 'keyCount', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'encryptedPayload', 'keyCount', 'updatedBy', 'updatedAt'])
+        && data.id == configId
+        && configId == 'keyPool'
+        && isValidId(data.id)
+        && data.encryptedPayload is string
+        && data.encryptedPayload.size() >= 1
+        && data.encryptedPayload.size() <= 65536
+        && data.keyCount is int
+        && data.keyCount >= 0
+        && data.keyCount <= 100
+        && data.updatedBy is string
+        && data.updatedBy.size() <= 254
+        && data.updatedBy == '8887ashu@gmail.com'
+        && data.updatedAt is timestamp;
+    }
+
     match /users/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isAdmin();
@@ -315,6 +333,24 @@ service cloud.firestore {
         && exists(/databases/$(database)/documents/users/$(request.auth.uid));
       allow update: if false;
       allow delete: if isAdmin();
+    }
+
+    match /systemConfig/{configId} {
+      allow get: if isValidId(configId) && configId == 'keyPool' && isSignedIn();
+      allow list: if false;
+      allow create: if isValidId(configId)
+        && configId == 'keyPool'
+        && isAdmin()
+        && isValidSystemKeyPool(incoming(), configId)
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(configId)
+        && configId == 'keyPool'
+        && isAdmin()
+        && isValidSystemKeyPool(incoming(), configId)
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['id', 'encryptedPayload', 'keyCount', 'updatedBy', 'updatedAt']);
+      allow delete: if isValidId(configId) && configId == 'keyPool' && isAdmin();
     }
   }
 }

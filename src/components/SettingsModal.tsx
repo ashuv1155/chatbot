@@ -171,6 +171,9 @@ export function SettingsModal({
       if (data.capReached) {
         parts.push('100-key pool limit reached');
       }
+      if (data.persistedToCloud) {
+        parts.push('saved permanently to database');
+      }
       setFeedback({ type: 'success', text: `${parts.join(' · ')}.` });
     } catch (err) {
       setFeedback({
@@ -644,8 +647,8 @@ export function SettingsModal({
               />
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                  Keys are saved on the server and masked immediately. Requests
-                  auto-balance and fail over on 429 limits.
+                  Keys are encrypted and saved to Firestore + server pool for all
+                  users. Requests auto-balance and fail over on 429 limits.
                 </p>
                 <button
                   type="button"

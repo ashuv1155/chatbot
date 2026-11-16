@@ -1,5 +1,6 @@
 import express from "express";
 import type { Express, Request, Response } from "express";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,8 @@ import {
   type SearchRecency,
 } from "./search.ts";
 import {
+  extractBearerToken,
+  getFirebaseRestConfig,
   isVerifiedAdmin,
   resolveRequestUser,
   type VerifiedUser,
@@ -89,6 +92,55 @@ function getKeyStorePaths(): string[] {
 }
 
 let customKeysMemoryCache: string[] | null = null;
+let hydratedFromFirestore = false;
+let firestoreDocExists = false;
+let lastFirestoreSyncAt = 0;
+
+function getKeyEncryptionSecret(): Buffer {
+  const { projectId } = getFirebaseRestConfig();
+  const seed =
+    process.env.KEY_POOL_SECRET?.trim() ||
+    `${projectId}:${FALLBACK_KEY}:ashutosh-gpt-keypool-v1`;
+  return crypto.createHash("sha256").update(seed).digest();
+}
+
+function encryptKeysPayload(keys: string[]): string {
+  const key = getKeyEncryptionSecret();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const plaintext = Buffer.from(JSON.stringify(keys), "utf8");
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `v1.${iv.toString("base64")}.${tag.toString("base64")}.${encrypted.toString("base64")}`;
+}
+
+function decryptKeysPayload(payload: string): string[] | null {
+  try {
+    const parts = payload.split(".");
+    if (parts.length !== 4 || parts[0] !== "v1") return null;
+    const iv = Buffer.from(parts[1], "base64");
+    const tag = Buffer.from(parts[2], "base64");
+    const ciphertext = Buffer.from(parts[3], "base64");
+    const decipher = crypto.createDecipheriv(
+      "aes-256-gcm",
+      getKeyEncryptionSecret(),
+      iv,
+    );
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final(),
+    ]).toString("utf8");
+    const parsed = JSON.parse(decrypted);
+    if (!Array.isArray(parsed)) return null;
+    return parsed
+      .filter((k): k is string => typeof k === "string")
+      .map((k) => k.trim())
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
+}
 
 function loadCustomKeys(): string[] {
   if (customKeysMemoryCache !== null) {
@@ -115,7 +167,7 @@ function loadCustomKeys(): string[] {
   return customKeysMemoryCache;
 }
 
-function saveCustomKeys(keys: string[]): void {
+function saveCustomKeysLocal(keys: string[]): string[] {
   const deduped = Array.from(new Set(keys.map((k) => k.trim()).filter(Boolean)));
   customKeysMemoryCache = deduped;
   const serialized = JSON.stringify(deduped, null, 2);
@@ -123,11 +175,163 @@ function saveCustomKeys(keys: string[]): void {
   for (const filePath of getKeyStorePaths()) {
     try {
       fs.writeFileSync(filePath, serialized, { encoding: "utf8", mode: 0o600 });
-      return;
+      break;
     } catch {
       // Fallback to tmpdir on read-only serverless filesystems
     }
   }
+  return deduped;
+}
+
+async function fetchCustomKeysFromFirestore(bearerToken: string): Promise<{
+  ok: boolean;
+  exists: boolean;
+  keys: string[];
+}> {
+  try {
+    const { projectId, databaseId } = getFirebaseRestConfig();
+    const docUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      projectId,
+    )}/databases/${encodeURIComponent(databaseId)}/documents/systemConfig/keyPool`;
+
+    const res = await fetch(docUrl, {
+      headers: { Authorization: `Bearer ${bearerToken}` },
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (res.status === 404) {
+      return { ok: true, exists: false, keys: [] };
+    }
+    if (!res.ok) {
+      return { ok: false, exists: false, keys: [] };
+    }
+
+    const doc = (await res.json()) as {
+      fields?: {
+        encryptedPayload?: { stringValue?: string };
+      };
+    };
+    const encryptedPayload = doc?.fields?.encryptedPayload?.stringValue;
+    if (!encryptedPayload) {
+      return { ok: true, exists: true, keys: [] };
+    }
+    const decoded = decryptKeysPayload(encryptedPayload);
+    if (!decoded) {
+      return { ok: false, exists: true, keys: [] };
+    }
+    return { ok: true, exists: true, keys: decoded };
+  } catch {
+    return { ok: false, exists: false, keys: [] };
+  }
+}
+
+async function saveCustomKeysToFirestore(
+  keys: string[],
+  adminEmail: string,
+  bearerToken: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { projectId, databaseId } = getFirebaseRestConfig();
+    const commitUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      projectId,
+    )}/databases/${encodeURIComponent(databaseId)}/documents:commit`;
+    const docName = `projects/${projectId}/databases/${databaseId}/documents/systemConfig/keyPool`;
+    const encryptedPayload = encryptKeysPayload(keys);
+
+    const res = await fetch(commitUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${bearerToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        writes: [
+          {
+            update: {
+              name: docName,
+              fields: {
+                id: { stringValue: "keyPool" },
+                encryptedPayload: { stringValue: encryptedPayload },
+                keyCount: { integerValue: String(keys.length) },
+                updatedBy: { stringValue: adminEmail },
+              },
+            },
+            updateTransforms: [
+              {
+                fieldPath: "updatedAt",
+                setToServerValue: "REQUEST_TIME",
+              },
+            ],
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => null);
+      const msg =
+        errBody?.error?.message || `Firestore commit failed (${res.status})`;
+      return { ok: false, error: msg };
+    }
+
+    hydratedFromFirestore = true;
+    firestoreDocExists = true;
+    lastFirestoreSyncAt = Date.now();
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error ? err.message : "Failed to connect to Firestore",
+    };
+  }
+}
+
+async function ensureKeyPoolHydrated(
+  bearerToken?: string | null,
+  options?: { force?: boolean },
+): Promise<boolean> {
+  loadCustomKeys();
+  if (!bearerToken) return false;
+
+  const now = Date.now();
+  const isStale = now - lastFirestoreSyncAt > 30_000;
+  if (!options?.force && hydratedFromFirestore && !isStale) {
+    return true;
+  }
+
+  const remote = await fetchCustomKeysFromFirestore(bearerToken);
+  if (!remote.ok) return false;
+
+  hydratedFromFirestore = true;
+  firestoreDocExists = remote.exists;
+  lastFirestoreSyncAt = Date.now();
+
+  if (remote.exists) {
+    saveCustomKeysLocal(remote.keys);
+    syncKeyPool();
+  }
+  return true;
+}
+
+async function saveCustomKeysPersisted(
+  keys: string[],
+  adminEmail: string,
+  bearerToken: string,
+): Promise<{ deduped: string[]; persistedToCloud: boolean; error?: string }> {
+  const deduped = saveCustomKeysLocal(keys);
+  syncKeyPool();
+  const cloudResult = await saveCustomKeysToFirestore(
+    deduped,
+    adminEmail,
+    bearerToken,
+  );
+  return {
+    deduped,
+    persistedToCloud: cloudResult.ok,
+    error: cloudResult.error,
+  };
 }
 
 function collectConfiguredKeys(): Array<{
@@ -588,12 +792,15 @@ export function registerApiRoutes(app: Express): void {
   // Live model pricing/costing + pooled quota (per-key details returned to verified admin only)
   app.get("/api/quota", async (req: Request, res: Response) => {
     try {
+      const bearerToken = extractBearerToken(req);
       const caller = await resolveRequestUser(req);
       const admin = isVerifiedAdmin(caller);
+      await ensureKeyPoolHydrated(bearerToken);
       await refreshAllKeys();
       const totals = computePoolTotals();
       res.json({
         isAdmin: admin,
+        persistedToCloud: hydratedFromFirestore,
         models: cachedModels,
         quota: totals.quota,
         poolSummary: totals.poolSummary,
@@ -615,6 +822,8 @@ export function registerApiRoutes(app: Express): void {
     const admin = await requireAdmin(req, res);
     if (!admin) return;
     try {
+      const bearerToken = extractBearerToken(req);
+      await ensureKeyPoolHydrated(bearerToken, { force: true });
       await refreshAllKeys();
       const totals = computePoolTotals();
       const liveUsers = Array.from(serverUserUsageMap.values()).sort(
@@ -622,6 +831,7 @@ export function registerApiRoutes(app: Express): void {
       );
       res.json({
         adminEmail: admin.email,
+        persistedToCloud: hydratedFromFirestore,
         serverStartedAt,
         uptimeSeconds: Math.floor((Date.now() - serverStartedAt) / 1000),
         models: cachedModels,
@@ -638,10 +848,11 @@ export function registerApiRoutes(app: Express): void {
     }
   });
 
-  // Bulk-add up to 100 API keys to the server-side pool (Admin only)
+  // Bulk-add up to 100 API keys to the server-side pool (Admin only, persisted to Firestore)
   app.post("/api/keys", async (req: Request, res: Response) => {
     const admin = await requireAdmin(req, res);
     if (!admin) return;
+    const bearerToken = extractBearerToken(req);
 
     const rawKeysInput = req.body?.keys;
     let parsedList: string[] = [];
@@ -667,6 +878,8 @@ export function registerApiRoutes(app: Express): void {
       return;
     }
 
+    await ensureKeyPoolHydrated(bearerToken, { force: true });
+
     const currentPool = syncKeyPool();
     const existingSecrets = new Set(currentPool.map((k) => k.secret));
     const currentCustom = loadCustomKeys();
@@ -688,8 +901,21 @@ export function registerApiRoutes(app: Express): void {
       addedSecrets.push(candidate);
     }
 
-    if (addedSecrets.length > 0) {
-      saveCustomKeys([...currentCustom, ...addedSecrets]);
+    let persistedToCloud = firestoreDocExists;
+    let persistenceError: string | undefined;
+
+    const shouldWriteCloud =
+      (addedSecrets.length > 0 || (!firestoreDocExists && currentCustom.length > 0)) &&
+      Boolean(bearerToken);
+
+    if (shouldWriteCloud && bearerToken) {
+      const saveResult = await saveCustomKeysPersisted(
+        [...currentCustom, ...addedSecrets],
+        admin.email,
+        bearerToken,
+      );
+      persistedToCloud = saveResult.persistedToCloud;
+      persistenceError = saveResult.error;
     }
 
     const updatedPool = syncKeyPool();
@@ -700,20 +926,36 @@ export function registerApiRoutes(app: Express): void {
     }
 
     const totals = computePoolTotals();
+    if (shouldWriteCloud && !persistedToCloud) {
+      res.status(502).json({
+        error: {
+          message: `Keys loaded locally, but cloud database save failed: ${persistenceError || "Firestore write rejected"}`,
+        },
+        added: addedSecrets.length,
+        persistedToCloud: false,
+        ...totals,
+      });
+      return;
+    }
+
     res.json({
       added: addedSecrets.length,
       duplicatesSkipped,
       capReached,
+      persistedToCloud,
       maxKeys: MAX_POOL_KEYS,
       models: cachedModels,
       ...totals,
     });
   });
 
-  // Remove a single settings-added key by ID (Admin only)
+  // Remove a single settings-added key by ID (Admin only, persisted to Firestore)
   app.delete("/api/keys/:id", async (req: Request, res: Response) => {
     const admin = await requireAdmin(req, res);
     if (!admin) return;
+    const bearerToken = extractBearerToken(req);
+
+    await ensureKeyPoolHydrated(bearerToken, { force: true });
 
     const { id } = req.params;
     const pool = syncKeyPool();
@@ -736,19 +978,54 @@ export function registerApiRoutes(app: Express): void {
     const remainingCustom = loadCustomKeys().filter(
       (secret) => secret !== target.secret,
     );
-    saveCustomKeys(remainingCustom);
+    const saveResult = bearerToken
+      ? await saveCustomKeysPersisted(remainingCustom, admin.email, bearerToken)
+      : {
+          deduped: saveCustomKeysLocal(remainingCustom),
+          persistedToCloud: false,
+          error: "Missing admin token",
+        };
     const totals = computePoolTotals();
-    res.json({ removed: target.label, ...totals });
+    if (!saveResult.persistedToCloud) {
+      res.status(502).json({
+        error: {
+          message: `Failed to sync key removal to Firestore: ${saveResult.error || "Unknown error"}`,
+        },
+        ...totals,
+      });
+      return;
+    }
+    res.json({
+      removed: target.label,
+      persistedToCloud: true,
+      ...totals,
+    });
   });
 
-  // Clear all settings-added keys (Admin only)
+  // Clear all settings-added keys (Admin only, persisted to Firestore)
   app.delete("/api/keys", async (req: Request, res: Response) => {
     const admin = await requireAdmin(req, res);
     if (!admin) return;
+    const bearerToken = extractBearerToken(req);
 
-    saveCustomKeys([]);
+    const saveResult = bearerToken
+      ? await saveCustomKeysPersisted([], admin.email, bearerToken)
+      : {
+          deduped: saveCustomKeysLocal([]),
+          persistedToCloud: false,
+          error: "Missing admin token",
+        };
     const totals = computePoolTotals();
-    res.json({ cleared: true, ...totals });
+    if (!saveResult.persistedToCloud) {
+      res.status(502).json({
+        error: {
+          message: `Failed to clear keys in Firestore: ${saveResult.error || "Unknown error"}`,
+        },
+        ...totals,
+      });
+      return;
+    }
+    res.json({ cleared: true, persistedToCloud: true, ...totals });
   });
 
   // Live public service telemetry from 100milionseek
@@ -884,7 +1161,11 @@ export function registerApiRoutes(app: Express): void {
 
   // Chat completions proxy with multi-key load balancing, 429 failover, Web Search & Deep Search
   app.post("/api/chat", async (req: Request, res: Response) => {
-    const callerUser = await resolveRequestUser(req);
+    const bearerToken = extractBearerToken(req);
+    const [callerUser] = await Promise.all([
+      resolveRequestUser(req),
+      ensureKeyPoolHydrated(bearerToken),
+    ]);
     const {
       messages,
       model = DEFAULT_MODEL,
@@ -960,12 +1241,24 @@ export function registerApiRoutes(app: Express): void {
       typeof responseStyle === "string" ? responseStyle : undefined,
       typeof tone === "string" ? tone : undefined,
     );
-    if (styleHint) {
-      finalMessages.unshift({
-        role: "system",
-        content: styleHint,
-      });
-    }
+    const todayUtc = new Date().toISOString().slice(0, 10);
+    const previewCapabilityHint = [
+      `You are Ashutosh GPT. Today's date (UTC) is ${todayUtc}.`,
+      "ANSWER QUALITY: Lead directly with the clearest, most accurate answer—skip filler or robotic disclaimers. Structure longer answers with crisp headings, scannable bullet points, concrete examples, and Markdown comparison tables when comparing options. Never invent citations, benchmarks, APIs, or URLs.",
+      "MEDIA & PREVIEW RULES: NEVER invent or output placeholder external image/media URLs (such as example.com, unsplash.com, picsum.photos, or unverified links). When the user asks to generate an image, illustration, picture, icon, logo, diagram, chart, interactive widget, audio/canvas media, or UI component, ALWAYS output complete, self-contained, polished code inside an appropriate fenced block:",
+      "- ```svg: explicit xmlns, width, height, viewBox, rich <defs> gradients, balanced composition, high-contrast typography/strokes.",
+      "- ```mermaid: wrap node labels containing spaces, parentheses, colons, or slashes in double quotes (e.g. A[\"Parse Input (JSON)\"]) so diagrams render cleanly.",
+      "- ```html: complete responsive UI/Canvas/Web Audio widgets (Tailwind utility classes are supported automatically) with zero TODO stubs.",
+      "- ```tsx: complete interactive React component with a default export and accessible controls.",
+      "- ```csv: clean tabular datasets.",
+    ].join("\n");
+    const combinedHint = styleHint
+      ? `${previewCapabilityHint}\n\nStyle preference: ${styleHint}`
+      : previewCapabilityHint;
+    finalMessages.unshift({
+      role: "system",
+      content: combinedHint,
+    });
 
     let searchMetaResult: SearchProgressEvent | null = null;
 
@@ -973,7 +1266,11 @@ export function registerApiRoutes(app: Express): void {
       const lastUserMsg = [...finalMessages]
         .reverse()
         .find((m) => m.role === "user");
-      const searchInput = lastUserMsg?.content?.trim() || "";
+      const rawSearchInput = lastUserMsg?.content?.trim() || "";
+      const searchInput = rawSearchInput
+        .replace(/\[Attached file:[^\]]+\]\s*```[\s\S]*?```/gi, " ")
+        .replace(/\[Attached (?:image|audio|video):[^\]]+\]/gi, " ")
+        .trim() || rawSearchInput;
 
       if (searchInput) {
         if (isStreaming) {
