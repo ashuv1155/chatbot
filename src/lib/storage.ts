@@ -10,6 +10,11 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   temperature: 0.7,
   maxTokens: 8192,
   stream: true,
+  defaultSearchMode: 'off',
+  searchRecency: 'any',
+  responseStyle: 'balanced',
+  tone: 'neutral',
+  showFollowUps: true,
 };
 
 export function loadConversations(): Conversation[] {
@@ -149,7 +154,7 @@ export function extractQuotaFromHeaders(headers: Headers): Partial<QuotaInfo> {
 export function exportConversationMarkdown(conv: Conversation): string {
   const lines: string[] = [
     `# ${conv.title}`,
-    `Exported ${new Date().toISOString()} · Model: deepseek-v4.1-flash-free`,
+    `Exported from Ashutosh GPT ${new Date().toISOString()} · Model: deepseek-v4.1-flash-free`,
     '',
   ];
   for (const msg of conv.messages) {

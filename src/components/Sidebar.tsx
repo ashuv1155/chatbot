@@ -3,6 +3,8 @@ import {
   Check,
   Command,
   Gauge,
+  LogIn,
+  LogOut,
   MessageSquare,
   Moon,
   PanelLeftClose,
@@ -10,11 +12,13 @@ import {
   Pin,
   Search,
   Settings,
+  ShieldCheck,
   SquarePen,
   Sun,
   Trash2,
   X,
 } from 'lucide-react';
+import type { User } from 'firebase/auth';
 import type { Conversation, PoolSummary, QuotaInfo } from '../types/chat';
 import {
   formatCompactNumber,
@@ -41,6 +45,11 @@ interface SidebarProps {
   onOpenCommandPalette: () => void;
   theme: 'dark' | 'light';
   onToggleTheme: () => void;
+  user: User | null;
+  isAdmin: boolean;
+  onOpenAdminConsole: () => void;
+  onSignIn: () => void;
+  onSignOut: () => void;
 }
 
 export function Sidebar({
@@ -62,7 +71,13 @@ export function Sidebar({
   onOpenCommandPalette,
   theme,
   onToggleTheme,
+  user,
+  isAdmin,
+  onOpenAdminConsole,
+  onSignIn,
+  onSignOut,
 }: SidebarProps) {
+  const [avatarError, setAvatarError] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
@@ -334,6 +349,20 @@ export function Sidebar({
             </div>
           </button>
 
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => {
+                onOpenAdminConsole();
+                onCloseMobile();
+              }}
+              className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-200 hover:bg-emerald-100/80 dark:hover:bg-emerald-900/40 transition-colors whitespace-nowrap shrink-0"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+              <span>Admin Console</span>
+            </button>
+          )}
+
           <div className="flex items-center gap-1.5">
             <button
               type="button"
@@ -341,7 +370,7 @@ export function Sidebar({
               className="flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200/70 dark:hover:bg-zinc-800/80 transition-colors whitespace-nowrap shrink-0"
             >
               <Settings className="w-3.5 h-3.5" />
-              <span>Model settings</span>
+              <span>Settings</span>
             </button>
             <button
               type="button"
@@ -365,6 +394,53 @@ export function Sidebar({
               )}
             </button>
           </div>
+
+          {user ? (
+            <div className="flex items-center justify-between gap-2 pt-1 border-t border-zinc-200/80 dark:border-zinc-800/80">
+              <div className="flex items-center gap-2 min-w-0">
+                {user.photoURL && !avatarError ? (
+                  <img
+                    src={user.photoURL}
+                    alt={user.displayName || user.email || 'Account'}
+                    referrerPolicy="no-referrer"
+                    onError={() => setAvatarError(true)}
+                    className="w-7 h-7 rounded-full object-cover shrink-0 border border-zinc-200 dark:border-zinc-700"
+                  />
+                ) : (
+                  <div className="w-7 h-7 rounded-full bg-emerald-600 text-white text-xs font-semibold flex items-center justify-center shrink-0">
+                    {(user.displayName || user.email || 'U')[0].toUpperCase()}
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-zinc-800 dark:text-zinc-200 truncate">
+                    {user.displayName || 'Google User'}
+                    {isAdmin ? ' · Admin' : ''}
+                  </div>
+                  <div className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">
+                    {user.email}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onSignOut}
+                title="Sign out"
+                aria-label="Sign out"
+                className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors shrink-0"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onSignIn}
+              className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-800 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0"
+            >
+              <LogIn className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+              <span>Sign in with Google</span>
+            </button>
+          )}
         </div>
       </aside>
     </>

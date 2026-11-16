@@ -7,6 +7,7 @@ import {
   Printer,
   Search,
   Settings,
+  ShieldCheck,
   SquarePen,
   Sun,
   X,
@@ -19,11 +20,13 @@ interface CommandPaletteProps {
   conversations: Conversation[];
   activeConversation: Conversation | null;
   theme: 'dark' | 'light';
+  isAdmin: boolean;
   onSelectConversation: (id: string) => void;
   onNewChat: () => void;
   onToggleTheme: () => void;
   onOpenSettings: () => void;
   onOpenQuota: () => void;
+  onOpenAdminConsole: () => void;
   onExportMarkdown: () => void;
   onExportJson: () => void;
   onPrint: () => void;
@@ -43,11 +46,13 @@ export function CommandPalette({
   conversations,
   activeConversation,
   theme,
+  isAdmin,
   onSelectConversation,
   onNewChat,
   onToggleTheme,
   onOpenSettings,
   onOpenQuota,
+  onOpenAdminConsole,
   onExportMarkdown,
   onExportJson,
   onPrint,
@@ -95,7 +100,7 @@ export function CommandPalette({
       },
       {
         id: 'quota',
-        label: 'Account quota & service status',
+        label: 'Shared token pool & usage status',
         icon: Gauge,
         run: () => {
           onClose();
@@ -103,6 +108,18 @@ export function CommandPalette({
         },
       },
     ];
+
+    if (isAdmin) {
+      base.push({
+        id: 'admin-console',
+        label: 'Open Admin Console (Users, Usage & API Keys)',
+        icon: ShieldCheck,
+        run: () => {
+          onClose();
+          onOpenAdminConsole();
+        },
+      });
+    }
 
     if (activeConversation && activeConversation.messages.length > 0) {
       base.push(
@@ -139,10 +156,12 @@ export function CommandPalette({
     return base;
   }, [
     activeConversation,
+    isAdmin,
     onClose,
     onExportJson,
     onExportMarkdown,
     onNewChat,
+    onOpenAdminConsole,
     onOpenQuota,
     onOpenSettings,
     onPrint,

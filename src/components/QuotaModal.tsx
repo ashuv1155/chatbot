@@ -20,6 +20,7 @@ import { formatCompactNumber, formatTimeUntilReset } from '../lib/storage';
 
 interface QuotaModalProps {
   isOpen: boolean;
+  isAdmin: boolean;
   quota: QuotaInfo;
   models: ModelPricingInfo[];
   keys: KeyMetric[];
@@ -72,6 +73,7 @@ function renderKeyStatus(status: KeyStatus) {
 
 export function QuotaModal({
   isOpen,
+  isAdmin,
   quota,
   models,
   keys,
@@ -143,10 +145,14 @@ export function QuotaModal({
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-200 dark:border-zinc-800">
           <div>
             <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-              API Key Pool, Consumption &amp; Costing
+              {isAdmin
+                ? 'API Key Pool, Consumption & Costing'
+                : 'Shared Token Pool & Usage'}
             </h2>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-              Aggregated consumption across all server-configured 100milionseek keys
+              {isAdmin
+                ? 'Aggregated consumption across all server-configured 100milionseek keys'
+                : 'Common daily token pool shared across all Ashutosh GPT users'}
             </p>
           </div>
           <div className="flex items-center gap-1">
@@ -245,116 +251,120 @@ export function QuotaModal({
 
           <hr className="border-zinc-200 dark:border-zinc-800" />
 
-          {/* Per-Key Consumption & Metrics */}
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                Per-Key Metrics &amp; Load Balancing
-              </span>
-              <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                Automatic 429 failover · Server-side env keys only
-              </span>
-            </div>
+          {/* Per-Key Consumption & Metrics (Admin Only) */}
+          {isAdmin ? (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                  Per-Key Metrics &amp; Load Balancing
+                </span>
+                <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  Automatic 429 failover · Admin only
+                </span>
+              </div>
 
-            <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-x-auto">
-              <table className="w-full text-left text-xs tabular-nums whitespace-nowrap">
-                <thead className="bg-zinc-50 dark:bg-zinc-900/70 text-zinc-500 dark:text-zinc-400 border-b border-zinc-200 dark:border-zinc-800">
-                  <tr>
-                    <th className="px-3 py-2 font-medium">Key</th>
-                    <th className="px-3 py-2 font-medium">Status</th>
-                    <th className="px-3 py-2 font-medium text-right">Used</th>
-                    <th className="px-3 py-2 font-medium text-right">
-                      Remaining
-                    </th>
-                    <th className="px-3 py-2 font-medium text-right">Limit</th>
-                    <th className="px-3 py-2 font-medium text-right">
-                      Streams
-                    </th>
-                    <th className="px-3 py-2 font-medium text-right">
-                      Reqs (OK)
-                    </th>
-                    <th className="px-3 py-2 font-medium text-right">QoS</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800/80">
-                  {keys.length === 0 ? (
+              <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-x-auto">
+                <table className="w-full text-left text-xs tabular-nums whitespace-nowrap">
+                  <thead className="bg-zinc-50 dark:bg-zinc-900/70 text-zinc-500 dark:text-zinc-400 border-b border-zinc-200 dark:border-zinc-800">
                     <tr>
-                      <td
-                        colSpan={8}
-                        className="px-3 py-4 text-center text-zinc-500"
-                      >
-                        Loading key pool metrics…
-                      </td>
+                      <th className="px-3 py-2 font-medium">Key</th>
+                      <th className="px-3 py-2 font-medium">Status</th>
+                      <th className="px-3 py-2 font-medium text-right">Used</th>
+                      <th className="px-3 py-2 font-medium text-right">
+                        Remaining
+                      </th>
+                      <th className="px-3 py-2 font-medium text-right">Limit</th>
+                      <th className="px-3 py-2 font-medium text-right">
+                        Streams
+                      </th>
+                      <th className="px-3 py-2 font-medium text-right">
+                        Reqs (OK)
+                      </th>
+                      <th className="px-3 py-2 font-medium text-right">QoS</th>
                     </tr>
-                  ) : (
-                    keys.map((k) => {
-                      const kLimit = k.quotaLimit ?? 0;
-                      const kUsed = k.quotaUsed ?? 0;
-                      const kPct =
-                        kLimit > 0
-                          ? ((kUsed / kLimit) * 100).toFixed(2)
-                          : '0.00';
-
-                      return (
-                        <tr
-                          key={k.id}
-                          className="hover:bg-zinc-50/70 dark:hover:bg-zinc-900/40"
+                  </thead>
+                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800/80">
+                    {keys.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={8}
+                          className="px-3 py-4 text-center text-zinc-500"
                         >
-                          <td className="px-3 py-2.5">
-                            <div className="font-mono text-zinc-800 dark:text-zinc-200">
-                              #{k.index} · {k.label}
-                            </div>
-                            {k.lastError && (
-                              <div className="text-[10px] text-rose-500 truncate max-w-[180px]">
-                                {k.lastError}
-                              </div>
-                            )}
-                          </td>
-                          <td className="px-3 py-2.5">
-                            {renderKeyStatus(k.status)}
-                          </td>
-                          <td className="px-3 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300">
-                            {k.quotaUsed !== null
-                              ? `${formatCompactNumber(k.quotaUsed)} (${kPct}%)`
-                              : '—'}
-                          </td>
-                          <td className="px-3 py-2.5 text-right font-mono text-zinc-900 dark:text-zinc-100 font-medium">
-                            {formatCompactNumber(k.quotaRemaining)}
-                          </td>
-                          <td className="px-3 py-2.5 text-right font-mono text-zinc-500 dark:text-zinc-400">
-                            {formatCompactNumber(k.quotaLimit)}
-                          </td>
-                          <td className="px-3 py-2.5 text-right font-mono text-zinc-600 dark:text-zinc-300">
-                            {k.inFlight}/{k.maxConcurrent}
-                          </td>
-                          <td className="px-3 py-2.5 text-right font-mono text-zinc-600 dark:text-zinc-300">
-                            {k.requestsTotal} ({k.requestsOk})
-                          </td>
-                          <td className="px-3 py-2.5 text-right font-mono text-zinc-500 dark:text-zinc-400">
-                            {k.qos || '—'}
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
+                          Loading key pool metrics…
+                        </td>
+                      </tr>
+                    ) : (
+                      keys.map((k) => {
+                        const kLimit = k.quotaLimit ?? 0;
+                        const kUsed = k.quotaUsed ?? 0;
+                        const kPct =
+                          kLimit > 0
+                            ? ((kUsed / kLimit) * 100).toFixed(2)
+                            : '0.00';
 
-            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-              To add or rotate 10+ keys, set{' '}
-              <code className="px-1 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 font-mono text-[11px]">
-                HMS_API_KEYS
-              </code>{' '}
-              (comma- or newline-separated) or{' '}
-              <code className="px-1 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 font-mono text-[11px]">
-                HMS_API_KEY_1..N
-              </code>{' '}
-              in your server environment (<code className="font-mono">.env</code>
-              , Render, or Vercel). Keys stay server-side and are never exposed
-              to the browser.
+                        return (
+                          <tr
+                            key={k.id}
+                            className="hover:bg-zinc-50/70 dark:hover:bg-zinc-900/40"
+                          >
+                            <td className="px-3 py-2.5">
+                              <div className="font-mono text-zinc-800 dark:text-zinc-200">
+                                #{k.index} · {k.label}
+                              </div>
+                              {k.lastError && (
+                                <div className="text-[10px] text-rose-500 truncate max-w-[180px]">
+                                  {k.lastError}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              {renderKeyStatus(k.status)}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300">
+                              {k.quotaUsed !== null
+                                ? `${formatCompactNumber(k.quotaUsed)} (${kPct}%)`
+                                : '—'}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono text-zinc-900 dark:text-zinc-100 font-medium">
+                              {formatCompactNumber(k.quotaRemaining)}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono text-zinc-500 dark:text-zinc-400">
+                              {formatCompactNumber(k.quotaLimit)}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono text-zinc-600 dark:text-zinc-300">
+                              {k.inFlight}/{k.maxConcurrent}
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono text-zinc-600 dark:text-zinc-300">
+                              {k.requestsTotal} ({k.requestsOk})
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono text-zinc-500 dark:text-zinc-400">
+                              {k.qos || '—'}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                To add or rotate 10+ keys, paste keys in Settings → API Keys
+                Pool, or set{' '}
+                <code className="px-1 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 font-mono text-[11px]">
+                  HMS_API_KEYS
+                </code>{' '}
+                / <code className="font-mono text-[11px]">HMS_API_KEY_1..N</code>{' '}
+                in your server environment.
+              </p>
+            </div>
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Your chat history is private to your account. API keys and shared
+              pool capacity are managed exclusively by the workspace
+              administrator.
             </p>
-          </div>
+          )}
 
           <hr className="border-zinc-200 dark:border-zinc-800" />
 

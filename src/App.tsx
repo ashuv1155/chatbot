@@ -16,9 +16,11 @@ import {
   PanelLeftOpen,
   Printer,
   Search,
+  ShieldCheck,
   SquarePen,
   Upload,
 } from 'lucide-react';
+import type { User } from 'firebase/auth';
 import type {
   Attachment,
   ChatMessage,
@@ -29,6 +31,12 @@ import type {
   PoolSummary,
   PreviewArtifact,
   QuotaInfo,
+  ResponseStyle,
+  ResponseTone,
+  SearchMode,
+  SearchProgress,
+  SearchRecency,
+  SearchSource,
   TokenUsage,
 } from './types/chat';
 import {
@@ -46,6 +54,24 @@ import {
   saveSettings,
   saveTheme,
 } from './lib/storage';
+import {
+  createConversationWithMessage,
+  deleteConversationFromFirestore,
+  deleteConversationMessagesAfter,
+  recordUserUsageToFirestore,
+  saveAssistantMessageToFirestore,
+  saveBranchedConversationToFirestore,
+  signInWithGoogle,
+  signOutUser,
+  subscribeAuthState,
+  subscribeConversationMessages,
+  subscribeUserConversations,
+  syncUserConversationsCount,
+  syncUserProfile,
+  updateConversationMetaInFirestore,
+  updateUserMessageContentInFirestore,
+} from './lib/firebase';
+import { getAuthHeaders, isAdminUser } from './lib/admin';
 import { downloadFile, readFileAsText } from './lib/browser';
 import { SSEChunkParser } from './lib/sse';
 import { Sidebar } from './components/Sidebar';
@@ -55,25 +81,34 @@ import { SettingsModal } from './components/SettingsModal';
 import { QuotaModal } from './components/QuotaModal';
 import { ArtifactPreview } from './components/ArtifactPreview';
 import { CommandPalette } from './components/CommandPalette';
+import { LoginScreen } from './components/LoginScreen';
+import { AdminDashboardModal } from './components/AdminDashboardModal';
 
-const STARTER_PROMPTS = [
+const STARTER_PROMPTS: Array<{
+  title: string;
+  subtitle: string;
+  prompt: string;
+  searchMode?: SearchMode;
+}> = [
   {
-    title: 'Explain SQLite WAL mode',
-    subtitle: 'Checkpoints, concurrency, and trade-offs',
+    title: 'Web Search: Latest AI & tech news',
+    subtitle: 'Live web search with clickable citations',
     prompt:
-      'Explain SQLite WAL mode, how readers and writers interact, and when you should avoid enabling it.',
+      'What are the most important open-source LLM and web development releases this week?',
+    searchMode: 'web',
+  },
+  {
+    title: 'Deep Search: SQLite WAL vs PostgreSQL',
+    subtitle: 'Multi-query research reading full docs',
+    prompt:
+      'Compare SQLite WAL mode vs PostgreSQL for high-concurrency read-heavy SaaS apps, including benchmarks and operational trade-offs.',
+    searchMode: 'deep',
   },
   {
     title: 'Build an interactive HTML widget',
     subtitle: 'Test the live side-by-side HTML preview',
     prompt:
       'Create a self-contained single-file HTML/CSS/JS interactive Pomodoro focus timer in an ```html code block with clean minimalist styling.',
-  },
-  {
-    title: 'Write a PostgreSQL retention query',
-    subtitle: 'Cohort query with clean indexing advice',
-    prompt:
-      'Write a PostgreSQL query to compute 7-day rolling active user retention from an events(user_id, created_at) table, and recommend the best index.',
   },
   {
     title: 'Debug a React streaming race',
@@ -92,7 +127,9 @@ function buildApiMessageContent(
   attachments?: Attachment[],
 ): string {
   if (!attachments || attachments.length === 0) return content;
-  const fileBlocks = attachments
+  const withContent = attachments.filter((att) => att.content.length > 0);
+  if (withContent.length === 0) return content;
+  const fileBlocks = withContent
     .map(
       (att) =>
         `[Attached file: ${att.name}]\n\`\`\`\n${att.content}\n\`\`\``,
@@ -141,21 +178,44 @@ function formatApiError(status: number, body: unknown): string {
 
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => loadTheme());
-  const [conversations, setConversations] = useState<Conversation[]>(() =>
-    loadConversations(),
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [guestMode, setGuestMode] = useState(false);
+
+  const [localConversations, setLocalConversations] = useState<Conversation[]>(
+    () => loadConversations(),
   );
-  const [activeId, setActiveId] = useState<string | null>(() => {
+  const [cloudConversations, setCloudConversations] = useState<Conversation[]>(
+    [],
+  );
+  const [cloudMessagesById, setCloudMessagesById] = useState<
+    Record<string, ChatMessage[]>
+  >({});
+
+  const [localActiveId, setLocalActiveId] = useState<string | null>(() => {
     const saved = loadActiveConversationId();
     const list = loadConversations();
     if (saved && list.some((c) => c.id === saved)) return saved;
     return null;
   });
+  const [cloudActiveId, setCloudActiveId] = useState<string | null>(null);
 
   const [settings, setSettings] = useState<ChatSettings>(() => loadSettings());
+  const [searchMode, setSearchMode] = useState<SearchMode>(
+    () => loadSettings().defaultSearchMode,
+  );
+  const [searchRecency, setSearchRecency] = useState<SearchRecency>(
+    () => loadSettings().searchRecency,
+  );
+  const [responseStyle, setResponseStyle] = useState<ResponseStyle>(
+    () => loadSettings().responseStyle,
+  );
+  const [tone, setTone] = useState<ResponseTone>(() => loadSettings().tone);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [quotaModalOpen, setQuotaModalOpen] = useState(false);
+  const [adminConsoleOpen, setAdminConsoleOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [previewArtifact, setPreviewArtifact] =
@@ -182,6 +242,53 @@ export default function App() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const userScrolledUpRef = useRef(false);
   const dragDepthRef = useRef(0);
+  const userRef = useRef<User | null>(null);
+  const streamingConvIdRef = useRef<string | null>(null);
+  const pendingConvWritesRef = useRef<Map<string, Promise<void>>>(new Map());
+  const lastSyncedConvCountRef = useRef<number | null>(null);
+
+  userRef.current = user;
+
+  const isAuthenticated = Boolean(authReady && user);
+  const isAdmin = useMemo(() => isAdminUser(user), [user]);
+  const activeId = isAuthenticated ? cloudActiveId : localActiveId;
+
+  const setActiveId = useCallback((id: string | null) => {
+    if (userRef.current) {
+      setCloudActiveId(id);
+    } else {
+      setLocalActiveId(id);
+    }
+  }, []);
+
+  const conversations = useMemo(() => {
+    if (!isAuthenticated) return localConversations;
+    return cloudConversations.map((c) => ({
+      ...c,
+      messages: cloudMessagesById[c.id] ?? c.messages,
+    }));
+  }, [
+    isAuthenticated,
+    localConversations,
+    cloudConversations,
+    cloudMessagesById,
+  ]);
+
+  const enqueueConvWrite = useCallback(
+    (convId: string, task: () => Promise<void>) => {
+      const prev =
+        pendingConvWritesRef.current.get(convId) ?? Promise.resolve();
+      const next = prev
+        .catch(() => {})
+        .then(task)
+        .catch((err) => {
+          console.error('Firestore write error:', err);
+        });
+      pendingConvWritesRef.current.set(convId, next);
+      return next;
+    },
+    [],
+  );
 
   // Sync theme class on <html>
   useEffect(() => {
@@ -194,18 +301,74 @@ export default function App() {
     saveTheme(theme);
   }, [theme]);
 
-  // Persist conversations & activeId
+  // Firebase Auth listener
   useEffect(() => {
-    saveConversations(conversations);
-  }, [conversations]);
+    return subscribeAuthState((nextUser) => {
+      setUser(nextUser);
+      setAuthReady(true);
+      lastSyncedConvCountRef.current = null;
+      if (nextUser) {
+        setGuestMode(false);
+        syncUserProfile(nextUser).catch(() => {});
+      } else {
+        setCloudConversations([]);
+        setCloudMessagesById({});
+        setCloudActiveId(null);
+        setAdminConsoleOpen(false);
+      }
+    });
+  }, []);
+
+  // Real-time Firestore conversations list when signed in
+  useEffect(() => {
+    if (!authReady || !user) return;
+    return subscribeUserConversations(
+      user.uid,
+      (items) => {
+        setCloudConversations(items);
+        if (lastSyncedConvCountRef.current !== items.length) {
+          lastSyncedConvCountRef.current = items.length;
+          syncUserConversationsCount(user.uid, items.length).catch(() => {});
+        }
+      },
+      (err) => {
+        console.error('Firestore conversations sync error:', err);
+      },
+    );
+  }, [authReady, user]);
+
+  // Real-time Firestore messages for the active conversation
+  useEffect(() => {
+    if (!authReady || !user || !cloudActiveId) return;
+    return subscribeConversationMessages(
+      user.uid,
+      cloudActiveId,
+      (msgs) => {
+        if (streamingConvIdRef.current === cloudActiveId) return;
+        setCloudMessagesById((prev) => ({
+          ...prev,
+          [cloudActiveId]: msgs,
+        }));
+      },
+      (err) => {
+        console.error('Firestore messages sync error:', err);
+      },
+    );
+  }, [authReady, user, cloudActiveId]);
+
+  // Persist local guest conversations & activeId
+  useEffect(() => {
+    saveConversations(localConversations);
+  }, [localConversations]);
 
   useEffect(() => {
-    saveActiveConversationId(activeId);
-  }, [activeId]);
+    saveActiveConversationId(localActiveId);
+  }, [localActiveId]);
 
   const refreshQuota = useCallback(async () => {
     try {
-      const res = await fetch('/api/quota');
+      const authHeaders = await getAuthHeaders(userRef.current);
+      const res = await fetch('/api/quota', { headers: authHeaders });
       if (res.ok) {
         const data = await res.json();
         if (data?.quota) {
@@ -227,8 +390,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    refreshQuota();
-  }, [refreshQuota]);
+    if (authReady) {
+      refreshQuota();
+    }
+  }, [authReady, user, refreshQuota]);
 
   const activeConversation = useMemo(
     () => conversations.find((c) => c.id === activeId) || null,
@@ -251,6 +416,24 @@ export default function App() {
     setInput('');
     setAttachments([]);
     setPreviewArtifact(null);
+  }, [setActiveId]);
+
+  const handleSidebarSignIn = useCallback(async () => {
+    try {
+      await signInWithGoogle();
+    } catch {
+      setGuestMode(false);
+    }
+  }, []);
+
+  const handleSignOut = useCallback(async () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    await signOutUser();
+    setCloudActiveId(null);
+    setPreviewArtifact(null);
+    setGuestMode(false);
   }, []);
 
   // Global cross-browser keyboard shortcuts
@@ -273,6 +456,7 @@ export default function App() {
           !commandPaletteOpen &&
           !settingsOpen &&
           !quotaModalOpen &&
+          !adminConsoleOpen &&
           streamingConvId
         ) {
           handleStop();
@@ -282,6 +466,7 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    adminConsoleOpen,
     commandPaletteOpen,
     exportMenuOpen,
     handleNewChat,
@@ -335,18 +520,31 @@ export default function App() {
       assistantMsgId: string,
       updater: (msg: ChatMessage) => ChatMessage,
     ) => {
-      setConversations((prev) =>
-        prev.map((conv) => {
-          if (conv.id !== convId) return conv;
+      if (userRef.current) {
+        setCloudMessagesById((prev) => {
+          const list = prev[convId];
+          if (!list) return prev;
           return {
-            ...conv,
-            updatedAt: Date.now(),
-            messages: conv.messages.map((m) =>
+            ...prev,
+            [convId]: list.map((m) =>
               m.id === assistantMsgId ? updater(m) : m,
             ),
           };
-        }),
-      );
+        });
+      } else {
+        setLocalConversations((prev) =>
+          prev.map((conv) => {
+            if (conv.id !== convId) return conv;
+            return {
+              ...conv,
+              updatedAt: Date.now(),
+              messages: conv.messages.map((m) =>
+                m.id === assistantMsgId ? updater(m) : m,
+              ),
+            };
+          }),
+        );
+      }
     },
     [],
   );
@@ -355,10 +553,12 @@ export default function App() {
     async (
       convId: string,
       historyForApi: ChatMessage[],
-      assistantMsgId: string,
+      assistantTemplate: ChatMessage,
+      activeSearchMode: SearchMode,
     ) => {
       const controller = new AbortController();
       abortControllerRef.current = controller;
+      streamingConvIdRef.current = convId;
       setStreamingConvId(convId);
       userScrolledUpRef.current = false;
 
@@ -377,16 +577,32 @@ export default function App() {
         });
       }
 
+      let accumulatedContent = '';
+      let accumulatedReasoning = '';
+      let finalUsage: TokenUsage | undefined;
+      let latestSources: SearchSource[] | undefined;
+      let latestQueries: string[] | undefined;
+      let latestProgress: SearchProgress | undefined;
+      let finalMessage: ChatMessage = {
+        ...assistantTemplate,
+        isStreaming: false,
+      };
+
       try {
+        const authHeaders = await getAuthHeaders(userRef.current);
         const res = await fetch('/api/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({
             model: 'deepseek-v4.1-flash-free',
             messages: apiMessages,
             stream: settings.stream,
             temperature: settings.temperature,
             max_tokens: settings.maxTokens,
+            searchMode: activeSearchMode,
+            searchRecency,
+            responseStyle,
+            tone,
           }),
           signal: controller.signal,
         });
@@ -399,144 +615,248 @@ export default function App() {
         if (!res.ok) {
           const errBody = await res.json().catch(() => null);
           const errMsg = formatApiError(res.status, errBody);
-          updateAssistantMessage(convId, assistantMsgId, (m) => ({
-            ...m,
+          finalMessage = {
+            ...assistantTemplate,
             isStreaming: false,
             error: errMsg,
-          }));
-          return;
-        }
-
-        if (!settings.stream) {
+          };
+          updateAssistantMessage(convId, assistantTemplate.id, () => finalMessage);
+        } else if (!settings.stream) {
           const data = await res.json();
           const choice = data?.choices?.[0];
           const content = choice?.message?.content || '';
           const reasoning = choice?.message?.reasoning_content || undefined;
           const usage: TokenUsage | undefined = data?.usage;
+          const meta = data?.ashutosh_meta;
+          latestSources = Array.isArray(meta?.sources) ? meta.sources : undefined;
+          latestQueries = Array.isArray(meta?.queries) ? meta.queries : undefined;
 
-          updateAssistantMessage(convId, assistantMsgId, (m) => ({
-            ...m,
+          finalMessage = {
+            ...assistantTemplate,
             content,
             reasoning,
             usage,
+            searchMode: activeSearchMode,
+            searchQueries: latestQueries,
+            sources: latestSources,
             isStreaming: false,
-          }));
-          refreshQuota();
-          return;
-        }
-
-        if (!res.body) {
-          throw new Error('Response stream body is empty.');
-        }
-
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        const parser = new SSEChunkParser();
-        let accumulatedContent = '';
-        let accumulatedReasoning = '';
-        let finalUsage: TokenUsage | undefined;
-
-        const processDecodedText = (text: string): boolean => {
-          if (!text) return false;
-          const { events, done: sseDone } = parser.push(text);
-          let changed = false;
-
-          for (const evt of events) {
-            if (evt.error?.message) {
-              throw new Error(evt.error.message);
-            }
-            const delta = evt.choices?.[0]?.delta;
-            if (delta?.reasoning_content) {
-              accumulatedReasoning += delta.reasoning_content;
-              changed = true;
-            }
-            if (delta?.content) {
-              accumulatedContent += delta.content;
-              changed = true;
-            }
-            if (evt.usage && typeof evt.usage.total_tokens === 'number') {
-              finalUsage = {
-                prompt_tokens: evt.usage.prompt_tokens ?? 0,
-                completion_tokens: evt.usage.completion_tokens ?? 0,
-                total_tokens: evt.usage.total_tokens,
-              };
-              changed = true;
-            }
-          }
-
-          if (changed) {
-            const nextContent = accumulatedContent;
-            const nextReasoning = accumulatedReasoning || undefined;
-            const nextUsage = finalUsage;
-            updateAssistantMessage(convId, assistantMsgId, (m) => ({
-              ...m,
-              content: nextContent,
-              reasoning: nextReasoning,
-              usage: nextUsage,
-            }));
-          }
-
-          return sseDone;
-        };
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            processDecodedText(decoder.decode());
-            break;
-          }
-          const text = decoder.decode(value, { stream: true });
-          const sseDone = processDecodedText(text);
-          if (sseDone) break;
-        }
-
-        updateAssistantMessage(convId, assistantMsgId, (m) => ({
-          ...m,
-          isStreaming: false,
-        }));
-        refreshQuota();
-      } catch (err) {
-        if ((err as Error)?.name === 'AbortError') {
-          updateAssistantMessage(convId, assistantMsgId, (m) => ({
-            ...m,
-            isStreaming: false,
-            aborted: true,
-          }));
+          };
+          updateAssistantMessage(convId, assistantTemplate.id, () => finalMessage);
           refreshQuota();
         } else {
-          updateAssistantMessage(convId, assistantMsgId, (m) => ({
-            ...m,
+          if (!res.body) {
+            throw new Error('Response stream body is empty.');
+          }
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          const parser = new SSEChunkParser();
+
+          const processDecodedText = (text: string): boolean => {
+            if (!text) return false;
+            const { events, done: sseDone } = parser.push(text);
+            let changed = false;
+
+            for (const evt of events) {
+              if (evt.error?.message) {
+                throw new Error(evt.error.message);
+              }
+              if (evt.ashutosh_meta) {
+                const meta = evt.ashutosh_meta;
+                latestProgress = {
+                  stage: meta.stage,
+                  queries: meta.queries || [],
+                  sourcesCount: meta.sourcesCount ?? 0,
+                  pagesRead: meta.pagesRead,
+                };
+                if (Array.isArray(meta.queries) && meta.queries.length > 0) {
+                  latestQueries = meta.queries;
+                }
+                if (Array.isArray(meta.sources)) {
+                  latestSources = meta.sources;
+                }
+                changed = true;
+              }
+              const delta = evt.choices?.[0]?.delta;
+              if (delta?.reasoning_content) {
+                accumulatedReasoning += delta.reasoning_content;
+                changed = true;
+              }
+              if (delta?.content) {
+                accumulatedContent += delta.content;
+                changed = true;
+              }
+              if (evt.usage && typeof evt.usage.total_tokens === 'number') {
+                finalUsage = {
+                  prompt_tokens: evt.usage.prompt_tokens ?? 0,
+                  completion_tokens: evt.usage.completion_tokens ?? 0,
+                  total_tokens: evt.usage.total_tokens,
+                };
+                changed = true;
+              }
+            }
+
+            if (changed) {
+              const nextContent = accumulatedContent;
+              const nextReasoning = accumulatedReasoning || undefined;
+              const nextUsage = finalUsage;
+              const nextProgress = latestProgress;
+              const nextSources = latestSources;
+              const nextQueries = latestQueries;
+              updateAssistantMessage(convId, assistantTemplate.id, (m) => ({
+                ...m,
+                content: nextContent,
+                reasoning: nextReasoning,
+                usage: nextUsage,
+                searchProgress: nextProgress,
+                searchQueries: nextQueries,
+                sources: nextSources,
+              }));
+            }
+
+            return sseDone;
+          };
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+              processDecodedText(decoder.decode());
+              break;
+            }
+            const text = decoder.decode(value, { stream: true });
+            const sseDone = processDecodedText(text);
+            if (sseDone) break;
+          }
+
+          finalMessage = {
+            ...assistantTemplate,
+            content: accumulatedContent,
+            reasoning: accumulatedReasoning || undefined,
+            usage: finalUsage,
+            searchMode: activeSearchMode,
+            searchQueries: latestQueries,
+            sources: latestSources,
+            searchProgress: undefined,
+            isStreaming: false,
+          };
+          updateAssistantMessage(convId, assistantTemplate.id, () => finalMessage);
+          refreshQuota();
+        }
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') {
+          finalMessage = {
+            ...assistantTemplate,
+            content: accumulatedContent,
+            reasoning: accumulatedReasoning || undefined,
+            usage: finalUsage,
+            searchMode: activeSearchMode,
+            searchQueries: latestQueries,
+            sources: latestSources,
+            searchProgress: undefined,
+            isStreaming: false,
+            aborted: true,
+          };
+          updateAssistantMessage(convId, assistantTemplate.id, () => finalMessage);
+          refreshQuota();
+        } else {
+          finalMessage = {
+            ...assistantTemplate,
+            content: accumulatedContent,
+            reasoning: accumulatedReasoning || undefined,
+            usage: finalUsage,
+            searchMode: activeSearchMode,
+            searchQueries: latestQueries,
+            sources: latestSources,
+            searchProgress: undefined,
             isStreaming: false,
             error:
               err instanceof Error
                 ? err.message
                 : 'Unexpected network error while generating response.',
-          }));
+          };
+          updateAssistantMessage(convId, assistantTemplate.id, () => finalMessage);
         }
       } finally {
+        const signedInUser = userRef.current;
+        if (signedInUser) {
+          await enqueueConvWrite(convId, () =>
+            saveAssistantMessageToFirestore(
+              signedInUser.uid,
+              convId,
+              finalMessage,
+            ),
+          );
+
+          const hasPartialOrFullOutput =
+            Boolean(finalMessage.usage) ||
+            finalMessage.content.length > 0 ||
+            Boolean(finalMessage.reasoning);
+          const promptTok =
+            finalMessage.usage?.prompt_tokens ??
+            (hasPartialOrFullOutput
+              ? estimateTokens(apiMessages.map((m) => m.content).join('\n'))
+              : 0);
+          const completionTok =
+            finalMessage.usage?.completion_tokens ??
+            (hasPartialOrFullOutput
+              ? estimateTokens(
+                  `${finalMessage.reasoning || ''}${finalMessage.content}`,
+                )
+              : 0);
+          const totalTok =
+            finalMessage.usage?.total_tokens ?? promptTok + completionTok;
+          const status = finalMessage.error
+            ? 'error'
+            : finalMessage.aborted
+              ? 'aborted'
+              : 'completed';
+
+          recordUserUsageToFirestore(signedInUser, {
+            model: 'deepseek-v4.1-flash-free',
+            searchMode: activeSearchMode,
+            responseStyle,
+            tone,
+            promptTokens: promptTok,
+            completionTokens: completionTok,
+            totalTokens: totalTok,
+            sourcesCount: latestSources?.length ?? 0,
+            status,
+            errorMessage: finalMessage.error,
+          }).catch((err) => {
+            console.error('Usage logging error:', err);
+          });
+        }
         if (abortControllerRef.current === controller) {
           abortControllerRef.current = null;
+        }
+        if (streamingConvIdRef.current === convId) {
+          streamingConvIdRef.current = null;
         }
         setStreamingConvId((prev) => (prev === convId ? null : prev));
       }
     },
     [
+      enqueueConvWrite,
       refreshQuota,
+      responseStyle,
+      searchRecency,
       settings.maxTokens,
       settings.stream,
       settings.systemPrompt,
       settings.temperature,
+      tone,
       updateAssistantMessage,
     ],
   );
 
   const handleSend = useCallback(
-    (overrideText?: string) => {
+    (overrideText?: string, modeOverride?: SearchMode) => {
       const text = (overrideText ?? input).trim();
       const pendingAttachments = overrideText ? [] : attachments;
       if (!text && pendingAttachments.length === 0) return;
       if (streamingConvId) return;
 
+      const effectiveSearchMode = modeOverride ?? searchMode;
       const now = Date.now();
       const userMsg: ChatMessage = {
         id: createId(),
@@ -544,12 +864,22 @@ export default function App() {
         content: text,
         attachments:
           pendingAttachments.length > 0 ? pendingAttachments : undefined,
+        searchMode: effectiveSearchMode,
         createdAt: now,
       };
       const assistantMsg: ChatMessage = {
         id: createId(),
         role: 'assistant',
         content: '',
+        searchMode: effectiveSearchMode,
+        searchProgress:
+          effectiveSearchMode !== 'off'
+            ? {
+                stage: effectiveSearchMode === 'deep' ? 'planning' : 'searching',
+                queries: [text.slice(0, 120)],
+                sourcesCount: 0,
+              }
+            : undefined,
         createdAt: now + 1,
         isStreaming: true,
       };
@@ -558,6 +888,8 @@ export default function App() {
         setInput('');
         setAttachments([]);
       }
+
+      const signedInUid = userRef.current?.uid;
 
       if (!activeConversation) {
         const newConvId = createId();
@@ -571,9 +903,33 @@ export default function App() {
           createdAt: now,
           updatedAt: now,
         };
-        setConversations((prev) => [newConv, ...prev]);
-        setActiveId(newConvId);
-        runCompletion(newConvId, [userMsg], assistantMsg.id);
+
+        if (signedInUid) {
+          setCloudConversations((prev) => [newConv, ...prev]);
+          setCloudMessagesById((prev) => ({
+            ...prev,
+            [newConvId]: [userMsg, assistantMsg],
+          }));
+          setCloudActiveId(newConvId);
+          enqueueConvWrite(newConvId, () =>
+            createConversationWithMessage(
+              signedInUid,
+              { id: newConvId, title, pinned: false },
+              userMsg,
+              true,
+            ),
+          );
+        } else {
+          setLocalConversations((prev) => [newConv, ...prev]);
+          setLocalActiveId(newConvId);
+        }
+
+        runCompletion(
+          newConvId,
+          [userMsg],
+          assistantMsg,
+          effectiveSearchMode,
+        );
       } else {
         const convId = activeConversation.id;
         const nextHistory = [...activeConversation.messages, userMsg];
@@ -582,26 +938,58 @@ export default function App() {
             ? generateTitle(text || pendingAttachments[0]?.name || 'New chat')
             : activeConversation.title;
 
-        setConversations((prev) =>
-          prev.map((c) =>
-            c.id === convId
-              ? {
-                  ...c,
-                  title: nextTitle,
-                  updatedAt: now,
-                  messages: [...nextHistory, assistantMsg],
-                }
-              : c,
-          ),
+        if (signedInUid) {
+          setCloudConversations((prev) =>
+            prev.map((c) =>
+              c.id === convId ? { ...c, title: nextTitle, updatedAt: now } : c,
+            ),
+          );
+          setCloudMessagesById((prev) => ({
+            ...prev,
+            [convId]: [...nextHistory, assistantMsg],
+          }));
+          enqueueConvWrite(convId, () =>
+            createConversationWithMessage(
+              signedInUid,
+              {
+                id: convId,
+                title: nextTitle,
+                pinned: Boolean(activeConversation.pinned),
+              },
+              userMsg,
+              false,
+            ),
+          );
+        } else {
+          setLocalConversations((prev) =>
+            prev.map((c) =>
+              c.id === convId
+                ? {
+                    ...c,
+                    title: nextTitle,
+                    updatedAt: now,
+                    messages: [...nextHistory, assistantMsg],
+                  }
+                : c,
+            ),
+          );
+        }
+
+        runCompletion(
+          convId,
+          nextHistory,
+          assistantMsg,
+          effectiveSearchMode,
         );
-        runCompletion(convId, nextHistory, assistantMsg.id);
       }
     },
     [
       activeConversation,
       attachments,
+      enqueueConvWrite,
       input,
       runCompletion,
+      searchMode,
       streamingConvId,
     ],
   );
@@ -614,29 +1002,62 @@ export default function App() {
       );
       if (idx === -1) return;
 
+      const convId = activeConversation.id;
       const priorMessages = activeConversation.messages.slice(0, idx);
+      const prevAssistant = activeConversation.messages[idx];
+      const effectiveSearchMode = prevAssistant.searchMode ?? searchMode;
+      const removedIds = activeConversation.messages
+        .slice(idx)
+        .map((m) => m.id);
       const freshAssistant: ChatMessage = {
         id: createId(),
         role: 'assistant',
         content: '',
+        searchMode: effectiveSearchMode,
+        searchProgress:
+          effectiveSearchMode !== 'off'
+            ? {
+                stage: effectiveSearchMode === 'deep' ? 'planning' : 'searching',
+                queries: [],
+                sourcesCount: 0,
+              }
+            : undefined,
         createdAt: Date.now(),
         isStreaming: true,
       };
 
-      setConversations((prev) =>
-        prev.map((c) =>
-          c.id === activeConversation.id
-            ? {
-                ...c,
-                updatedAt: Date.now(),
-                messages: [...priorMessages, freshAssistant],
-              }
-            : c,
-        ),
-      );
-      runCompletion(activeConversation.id, priorMessages, freshAssistant.id);
+      const signedInUid = userRef.current?.uid;
+      if (signedInUid) {
+        setCloudMessagesById((prev) => ({
+          ...prev,
+          [convId]: [...priorMessages, freshAssistant],
+        }));
+        enqueueConvWrite(convId, () =>
+          deleteConversationMessagesAfter(signedInUid, convId, removedIds),
+        );
+      } else {
+        setLocalConversations((prev) =>
+          prev.map((c) =>
+            c.id === convId
+              ? {
+                  ...c,
+                  updatedAt: Date.now(),
+                  messages: [...priorMessages, freshAssistant],
+                }
+              : c,
+          ),
+        );
+      }
+
+      runCompletion(convId, priorMessages, freshAssistant, effectiveSearchMode);
     },
-    [activeConversation, runCompletion, streamingConvId],
+    [
+      activeConversation,
+      enqueueConvWrite,
+      runCompletion,
+      searchMode,
+      streamingConvId,
+    ],
   );
 
   const handleBranchFromMessage = useCallback(
@@ -650,9 +1071,9 @@ export default function App() {
       const now = Date.now();
       const forkedMessages = activeConversation.messages
         .slice(0, idx + 1)
-        .map((m) => ({
+        .map((m, i) => ({
           ...m,
-          id: createId(),
+          id: `${now}-${String(i).padStart(4, '0')}-${Math.random().toString(36).slice(2, 6)}`,
           isStreaming: false,
         }));
 
@@ -664,10 +1085,23 @@ export default function App() {
         updatedAt: now,
       };
 
-      setConversations((prev) => [forkedConv, ...prev]);
-      setActiveId(forkedConv.id);
+      const signedInUid = userRef.current?.uid;
+      if (signedInUid) {
+        setCloudConversations((prev) => [forkedConv, ...prev]);
+        setCloudMessagesById((prev) => ({
+          ...prev,
+          [forkedConv.id]: forkedMessages,
+        }));
+        setCloudActiveId(forkedConv.id);
+        enqueueConvWrite(forkedConv.id, () =>
+          saveBranchedConversationToFirestore(signedInUid, forkedConv),
+        );
+      } else {
+        setLocalConversations((prev) => [forkedConv, ...prev]);
+        setLocalActiveId(forkedConv.id);
+      }
     },
-    [activeConversation],
+    [activeConversation, enqueueConvWrite],
   );
 
   const handleEditUserMessage = useCallback(
@@ -678,67 +1112,150 @@ export default function App() {
       );
       if (idx === -1) return;
 
+      const convId = activeConversation.id;
       const updatedUser: ChatMessage = {
         ...activeConversation.messages[idx],
         content: newContent,
-        createdAt: Date.now(),
       };
       const priorPlusUpdated = [
         ...activeConversation.messages.slice(0, idx),
         updatedUser,
       ];
+      const removedIds = activeConversation.messages
+        .slice(idx + 1)
+        .map((m) => m.id);
       const freshAssistant: ChatMessage = {
         id: createId(),
         role: 'assistant',
         content: '',
+        searchMode,
+        searchProgress:
+          searchMode !== 'off'
+            ? {
+                stage: searchMode === 'deep' ? 'planning' : 'searching',
+                queries: [newContent.slice(0, 120)],
+                sourcesCount: 0,
+              }
+            : undefined,
         createdAt: Date.now() + 1,
         isStreaming: true,
       };
 
-      setConversations((prev) =>
-        prev.map((c) =>
-          c.id === activeConversation.id
-            ? {
-                ...c,
-                updatedAt: Date.now(),
-                messages: [...priorPlusUpdated, freshAssistant],
-              }
-            : c,
-        ),
-      );
-      runCompletion(
-        activeConversation.id,
-        priorPlusUpdated,
-        freshAssistant.id,
-      );
+      const signedInUid = userRef.current?.uid;
+      if (signedInUid) {
+        setCloudMessagesById((prev) => ({
+          ...prev,
+          [convId]: [...priorPlusUpdated, freshAssistant],
+        }));
+        enqueueConvWrite(convId, async () => {
+          await updateUserMessageContentInFirestore(
+            signedInUid,
+            convId,
+            userMsgId,
+            newContent,
+          );
+          await deleteConversationMessagesAfter(
+            signedInUid,
+            convId,
+            removedIds,
+          );
+        });
+      } else {
+        setLocalConversations((prev) =>
+          prev.map((c) =>
+            c.id === convId
+              ? {
+                  ...c,
+                  updatedAt: Date.now(),
+                  messages: [...priorPlusUpdated, freshAssistant],
+                }
+              : c,
+          ),
+        );
+      }
+
+      runCompletion(convId, priorPlusUpdated, freshAssistant, searchMode);
     },
-    [activeConversation, runCompletion, streamingConvId],
+    [
+      activeConversation,
+      enqueueConvWrite,
+      runCompletion,
+      searchMode,
+      streamingConvId,
+    ],
   );
 
-  const handleRenameConversation = useCallback((id: string, title: string) => {
-    setConversations((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, title } : c)),
-    );
-  }, []);
+  const handleRenameConversation = useCallback(
+    (id: string, title: string) => {
+      const signedInUid = userRef.current?.uid;
+      if (signedInUid) {
+        setCloudConversations((prev) =>
+          prev.map((c) => (c.id === id ? { ...c, title } : c)),
+        );
+        enqueueConvWrite(id, () =>
+          updateConversationMetaInFirestore(signedInUid, id, { title }),
+        );
+      } else {
+        setLocalConversations((prev) =>
+          prev.map((c) => (c.id === id ? { ...c, title } : c)),
+        );
+      }
+    },
+    [enqueueConvWrite],
+  );
 
-  const handleTogglePinConversation = useCallback((id: string) => {
-    setConversations((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, pinned: !c.pinned } : c)),
-    );
-  }, []);
+  const handleTogglePinConversation = useCallback(
+    (id: string) => {
+      const signedInUid = userRef.current?.uid;
+      if (signedInUid) {
+        const target = cloudConversations.find((c) => c.id === id);
+        const nextPinned = !target?.pinned;
+        setCloudConversations((prev) =>
+          prev.map((c) => (c.id === id ? { ...c, pinned: nextPinned } : c)),
+        );
+        enqueueConvWrite(id, () =>
+          updateConversationMetaInFirestore(signedInUid, id, {
+            pinned: nextPinned,
+          }),
+        );
+      } else {
+        setLocalConversations((prev) =>
+          prev.map((c) => (c.id === id ? { ...c, pinned: !c.pinned } : c)),
+        );
+      }
+    },
+    [cloudConversations, enqueueConvWrite],
+  );
 
   const handleDeleteConversation = useCallback(
     (id: string) => {
       if (streamingConvId === id) {
         abortControllerRef.current?.abort();
       }
-      setConversations((prev) => prev.filter((c) => c.id !== id));
-      if (activeId === id) {
-        setActiveId(null);
-        setPreviewArtifact(null);
+      const signedInUid = userRef.current?.uid;
+      if (signedInUid) {
+        setCloudConversations((prev) => prev.filter((c) => c.id !== id));
+        setCloudMessagesById((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        if (cloudActiveId === id) {
+          setCloudActiveId(null);
+          setPreviewArtifact(null);
+        }
+        enqueueConvWrite(id, () =>
+          deleteConversationFromFirestore(signedInUid, id),
+        );
+      } else {
+        setLocalConversations((prev) => prev.filter((c) => c.id !== id));
+        if (localActiveId === id) {
+          setLocalActiveId(null);
+          setPreviewArtifact(null);
+        }
       }
     },
-    [activeId, streamingConvId],
+    [cloudActiveId, enqueueConvWrite, localActiveId, streamingConvId],
   );
 
   const handleExportMarkdown = useCallback(() => {
@@ -828,6 +1345,28 @@ export default function App() {
   const quotaMultiplier = primaryModel?.quota_multiplier ?? 1;
   const priceLabel = primaryModel?.price_label || '1x price';
 
+  if (!authReady) {
+    return (
+      <div className="min-h-dvh w-full flex items-center justify-center bg-white dark:bg-[#141416] text-zinc-500 dark:text-zinc-400">
+        <div className="flex items-center gap-2.5 text-sm">
+          <div className="w-4 h-4 rounded-full border-2 border-zinc-300 dark:border-zinc-700 border-t-emerald-600 dark:border-t-emerald-400 animate-spin" />
+          <span>Loading Ashutosh GPT…</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user && !guestMode) {
+    return (
+      <LoginScreen
+        onGoogleSignIn={async () => {
+          await signInWithGoogle();
+        }}
+        onContinueAsGuest={() => setGuestMode(true)}
+      />
+    );
+  }
+
   return (
     <div className="flex app-shell-height w-full overflow-hidden bg-white dark:bg-[#171719] text-zinc-900 dark:text-zinc-100">
       <Sidebar
@@ -852,6 +1391,11 @@ export default function App() {
         onOpenCommandPalette={() => setCommandPaletteOpen(true)}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+        user={user}
+        isAdmin={isAdmin}
+        onOpenAdminConsole={() => setAdminConsoleOpen(true)}
+        onSignIn={handleSidebarSignIn}
+        onSignOut={handleSignOut}
       />
 
       <main
@@ -915,7 +1459,7 @@ export default function App() {
               className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800/80 transition-colors min-w-0"
             >
               <span className="font-semibold text-[15px] tracking-tight text-zinc-900 dark:text-zinc-100 whitespace-nowrap">
-                SeekChat
+                Ashutosh GPT
               </span>
               <span className="text-xs text-zinc-400 dark:text-zinc-500 truncate hidden sm:inline">
                 deepseek-v4.1-flash-free
@@ -925,6 +1469,18 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setAdminConsoleOpen(true)}
+                title="Open Admin Console (Users, Usage & API Keys)"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 transition-colors whitespace-nowrap shrink-0"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Admin</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setCommandPaletteOpen(true)}
@@ -1009,10 +1565,10 @@ export default function App() {
             <div className="my-auto w-full max-w-3xl mx-auto space-y-8">
               <div className="text-center space-y-2.5">
                 <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100 text-balance">
-                  What can I help with?
+                  What can Ashutosh GPT help with?
                 </h1>
                 <p className="text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
-                  deepseek-v4.1-flash-free · 198K context window · 64K max output
+                  deepseek-v4.1-flash-free · Web Search &amp; Deep Research · 198K context
                 </p>
               </div>
 
@@ -1030,6 +1586,14 @@ export default function App() {
                 onStop={handleStop}
                 isStreaming={isStreamingActive}
                 contextTokensEstimate={contextTokensEstimate}
+                searchMode={searchMode}
+                onChangeSearchMode={setSearchMode}
+                searchRecency={searchRecency}
+                onChangeSearchRecency={setSearchRecency}
+                responseStyle={responseStyle}
+                onChangeResponseStyle={setResponseStyle}
+                tone={tone}
+                onChangeTone={setTone}
               />
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2">
@@ -1037,7 +1601,12 @@ export default function App() {
                   <button
                     key={item.title}
                     type="button"
-                    onClick={() => handleSend(item.prompt)}
+                    onClick={() => {
+                      if (item.searchMode) {
+                        setSearchMode(item.searchMode);
+                      }
+                      handleSend(item.prompt, item.searchMode);
+                    }}
                     className="text-left p-3.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/60 dark:bg-zinc-900/50 hover:bg-zinc-100 dark:hover:bg-zinc-800/70 hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors"
                   >
                     <div className="text-[13.5px] font-medium text-zinc-900 dark:text-zinc-100">
@@ -1064,12 +1633,19 @@ export default function App() {
                     key={msg.id}
                     message={msg}
                     isLastAssistant={msg.id === lastAssistantId}
+                    showFollowUps={settings.showFollowUps}
                     quotaMultiplier={quotaMultiplier}
                     onRegenerate={handleRegenerate}
                     onBranchFromMessage={handleBranchFromMessage}
                     onEditUserMessage={handleEditUserMessage}
                     onRetryError={handleRegenerate}
                     onPreviewArtifact={(artifact) => setPreviewArtifact(artifact)}
+                    onQuickFollowUp={(prompt, modeOverride) => {
+                      if (modeOverride) {
+                        setSearchMode(modeOverride);
+                      }
+                      handleSend(prompt, modeOverride);
+                    }}
                   />
                 ))}
               </div>
@@ -1106,6 +1682,14 @@ export default function App() {
                 onStop={handleStop}
                 isStreaming={isStreamingActive}
                 contextTokensEstimate={contextTokensEstimate}
+                searchMode={searchMode}
+                onChangeSearchMode={setSearchMode}
+                searchRecency={searchRecency}
+                onChangeSearchRecency={setSearchRecency}
+                responseStyle={responseStyle}
+                onChangeResponseStyle={setResponseStyle}
+                tone={tone}
+                onChangeTone={setTone}
               />
             </div>
           </>
@@ -1120,6 +1704,8 @@ export default function App() {
       <SettingsModal
         key={settingsOpen ? 'open' : 'closed'}
         isOpen={settingsOpen}
+        isAdmin={isAdmin}
+        authUser={user}
         settings={settings}
         keys={keyMetrics}
         poolSummary={poolSummary}
@@ -1139,12 +1725,17 @@ export default function App() {
         onSave={(next) => {
           setSettings(next);
           saveSettings(next);
+          setSearchMode(next.defaultSearchMode);
+          setSearchRecency(next.searchRecency);
+          setResponseStyle(next.responseStyle);
+          setTone(next.tone);
         }}
         onClose={() => setSettingsOpen(false)}
       />
 
       <QuotaModal
         isOpen={quotaModalOpen}
+        isAdmin={isAdmin}
         quota={quota}
         models={models}
         keys={keyMetrics}
@@ -1154,12 +1745,36 @@ export default function App() {
         onClose={() => setQuotaModalOpen(false)}
       />
 
+      {isAdmin && (
+        <AdminDashboardModal
+          isOpen={adminConsoleOpen}
+          user={user}
+          quota={quota}
+          keys={keyMetrics}
+          poolSummary={poolSummary}
+          onRefreshQuota={refreshQuota}
+          onPoolUpdated={(payload) => {
+            if (payload.quota) {
+              setQuota((prev) => ({ ...prev, ...payload.quota }));
+            }
+            if (Array.isArray(payload.keys)) {
+              setKeyMetrics(payload.keys);
+            }
+            if (payload.poolSummary) {
+              setPoolSummary(payload.poolSummary);
+            }
+          }}
+          onClose={() => setAdminConsoleOpen(false)}
+        />
+      )}
+
       <CommandPalette
         isOpen={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
         conversations={conversations}
         activeConversation={activeConversation}
         theme={theme}
+        isAdmin={isAdmin}
         onSelectConversation={(id) => {
           setActiveId(id);
           setPreviewArtifact(null);
@@ -1168,6 +1783,7 @@ export default function App() {
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenQuota={() => setQuotaModalOpen(true)}
+        onOpenAdminConsole={() => setAdminConsoleOpen(true)}
         onExportMarkdown={handleExportMarkdown}
         onExportJson={handleExportJson}
         onPrint={() => window.print()}

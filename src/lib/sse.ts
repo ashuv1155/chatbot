@@ -1,6 +1,11 @@
+import type { SearchProgress, SearchSource } from '../types/chat';
+
 export interface StreamChunk {
   id?: string;
   model?: string;
+  ashutosh_meta?: SearchProgress & {
+    sources?: SearchSource[];
+  };
   choices?: Array<{
     index?: number;
     delta?: {

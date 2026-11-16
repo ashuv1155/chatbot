@@ -1,0 +1,323 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and aggregated token usage metrics synchronized from Firebase Google Authentication",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication user UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name from Google profile",
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified email address",
+          "maxLength": 254
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Profile avatar URL",
+          "maxLength": 1024
+        },
+        "totalTokensUsed": {
+          "type": "integer",
+          "description": "Cumulative total tokens consumed by this user"
+        },
+        "promptTokensUsed": {
+          "type": "integer",
+          "description": "Cumulative prompt tokens consumed by this user"
+        },
+        "completionTokensUsed": {
+          "type": "integer",
+          "description": "Cumulative completion tokens consumed by this user"
+        },
+        "dailyTokensUsed": {
+          "type": "integer",
+          "description": "Tokens consumed by this user on usageDate (UTC)"
+        },
+        "usageDate": {
+          "type": "string",
+          "description": "UTC date string (YYYY-MM-DD) for dailyTokensUsed",
+          "maxLength": 16
+        },
+        "totalRequests": {
+          "type": "integer",
+          "description": "Total chat completion requests sent by this user"
+        },
+        "webSearchCount": {
+          "type": "integer",
+          "description": "Total Web Search requests executed by this user"
+        },
+        "deepSearchCount": {
+          "type": "integer",
+          "description": "Total Deep Search requests executed by this user"
+        },
+        "conversationsCount": {
+          "type": "integer",
+          "description": "Count of conversations owned by this user"
+        },
+        "lastModelUsed": {
+          "type": "string",
+          "description": "Most recent model used by this user",
+          "maxLength": 100
+        },
+        "lastSearchMode": {
+          "type": "string",
+          "enum": ["off", "web", "deep"],
+          "description": "Most recent search mode used by this user"
+        },
+        "lastActiveAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of user's latest activity"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Profile creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Profile last updated server timestamp"
+        }
+      },
+      "required": ["uid", "createdAt", "updatedAt"]
+    },
+    "ConversationDoc": {
+      "title": "ConversationDoc",
+      "description": "Metadata for an AI chat conversation owned privately by a user",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Conversation document ID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Conversation title",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "Whether the conversation is pinned in the sidebar"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last message update server timestamp"
+        }
+      },
+      "required": ["id", "ownerId", "title", "pinned", "createdAt", "updatedAt"]
+    },
+    "ChatMessageDoc": {
+      "title": "ChatMessageDoc",
+      "description": "Individual user or assistant turn within a private user conversation",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Message document ID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "conversationId": {
+          "type": "string",
+          "description": "Parent conversation ID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "assistant"],
+          "description": "Message author role"
+        },
+        "content": {
+          "type": "string",
+          "description": "Message markdown/text content",
+          "maxLength": 400000
+        },
+        "reasoning": {
+          "type": "string",
+          "description": "Optional assistant reasoning trace",
+          "maxLength": 200000
+        },
+        "error": {
+          "type": "string",
+          "description": "Optional error summary if generation failed",
+          "maxLength": 2000
+        },
+        "aborted": {
+          "type": "boolean",
+          "description": "Whether the user stopped generation mid-stream"
+        },
+        "searchMode": {
+          "type": "string",
+          "enum": ["off", "web", "deep"],
+          "description": "Search mode used for generating this message"
+        },
+        "searchQueries": {
+          "type": "array",
+          "description": "Web search queries executed for this message"
+        },
+        "sources": {
+          "type": "array",
+          "description": "Web search sources cited in this message"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Message creation server timestamp"
+        }
+      },
+      "required": ["id", "ownerId", "conversationId", "role", "content", "createdAt"]
+    },
+    "UsageLogDoc": {
+      "title": "UsageLogDoc",
+      "description": "Per-request token consumption audit event visible to the owner and admin",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Usage log document ID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Authenticated user UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "User email at request time",
+          "maxLength": 254
+        },
+        "userName": {
+          "type": "string",
+          "description": "User display name at request time",
+          "maxLength": 120
+        },
+        "model": {
+          "type": "string",
+          "description": "Model identifier",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "searchMode": {
+          "type": "string",
+          "enum": ["off", "web", "deep"],
+          "description": "Search mode used"
+        },
+        "responseStyle": {
+          "type": "string",
+          "description": "Response style selected",
+          "maxLength": 32
+        },
+        "tone": {
+          "type": "string",
+          "description": "Response tone selected",
+          "maxLength": 32
+        },
+        "promptTokens": {
+          "type": "integer",
+          "description": "Prompt tokens consumed"
+        },
+        "completionTokens": {
+          "type": "integer",
+          "description": "Completion tokens generated"
+        },
+        "totalTokens": {
+          "type": "integer",
+          "description": "Total tokens consumed"
+        },
+        "sourcesCount": {
+          "type": "integer",
+          "description": "Number of live web sources retrieved"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "aborted", "error"],
+          "description": "Outcome of the completion"
+        },
+        "errorMessage": {
+          "type": "string",
+          "description": "Optional error summary",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Event server timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "model",
+        "searchMode",
+        "promptTokens",
+        "completionTokens",
+        "totalTokens",
+        "status",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profile and aggregated usage counters keyed by Firebase Auth UID (readable by owner and admin)"
+    },
+    "/users/{userId}/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/ConversationDoc" },
+      "description": "Private user-owned chat conversations"
+    },
+    "/users/{userId}/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessageDoc" },
+      "description": "Private ordered messages belonging to a user conversation"
+    },
+    "/usageLogs/{logId}": {
+      "schema": { "$ref": "#/entities/UsageLogDoc" },
+      "description": "Immutable per-request token usage logs for admin analytics and user audit"
+    }
+  }
+}

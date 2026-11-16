@@ -7,15 +7,24 @@ import {
 } from 'react';
 import {
   ArrowUp,
+  Compass,
   FileText,
+  Globe,
   Mic,
   MicOff,
   Paperclip,
   Slash,
+  SlidersHorizontal,
   Square,
   X,
 } from 'lucide-react';
-import type { Attachment } from '../types/chat';
+import type {
+  Attachment,
+  ResponseStyle,
+  ResponseTone,
+  SearchMode,
+  SearchRecency,
+} from '../types/chat';
 import { estimateTokens, formatCompactNumber } from '../lib/storage';
 import {
   createSpeechRecognition,
@@ -34,19 +43,45 @@ interface ComposerProps {
   onStop: () => void;
   isStreaming: boolean;
   contextTokensEstimate: number;
+  searchMode: SearchMode;
+  onChangeSearchMode: (mode: SearchMode) => void;
+  searchRecency: SearchRecency;
+  onChangeSearchRecency: (recency: SearchRecency) => void;
+  responseStyle: ResponseStyle;
+  onChangeResponseStyle: (style: ResponseStyle) => void;
+  tone: ResponseTone;
+  onChangeTone: (tone: ResponseTone) => void;
 }
 
 interface SlashCommand {
   command: string;
   label: string;
   template: string;
+  switchSearchMode?: SearchMode;
 }
 
 const SLASH_COMMANDS: SlashCommand[] = [
   {
+    command: '/search',
+    label: 'Enable live Web Search',
+    template: '',
+    switchSearchMode: 'web',
+  },
+  {
+    command: '/deep',
+    label: 'Enable multi-step Deep Search',
+    template: '',
+    switchSearchMode: 'deep',
+  },
+  {
     command: '/explain',
     label: 'Explain step-by-step',
     template: 'Explain how the following works step-by-step, highlighting edge cases:\n\n',
+  },
+  {
+    command: '/eli5',
+    label: 'Explain simply with analogies',
+    template: 'Explain this clearly in plain language with everyday analogies:\n\n',
   },
   {
     command: '/review',
@@ -67,6 +102,12 @@ const SLASH_COMMANDS: SlashCommand[] = [
       'Write a clean, well-indexed SQL query for the following requirement and explain the query plan:\n\n',
   },
   {
+    command: '/table',
+    label: 'Compare in a structured table',
+    template:
+      'Compare the pros, cons, trade-offs, and best use cases in a clear comparison table:\n\n',
+  },
+  {
     command: '/test',
     label: 'Generate unit tests',
     template:
@@ -79,10 +120,38 @@ const SLASH_COMMANDS: SlashCommand[] = [
       'Create a self-contained single-file HTML/CSS/JS snippet in an ```html code block for:\n\n',
   },
   {
+    command: '/email',
+    label: 'Draft a clear professional email',
+    template:
+      'Draft a concise, well-structured email with a clear subject line for:\n\n',
+  },
+  {
     command: '/summarize',
     label: 'Concise bullet summary',
     template: 'Summarize the key points and action items concisely:\n\n',
   },
+];
+
+const STYLE_OPTIONS: Array<{ value: ResponseStyle; label: string }> = [
+  { value: 'balanced', label: 'Balanced' },
+  { value: 'concise', label: 'Concise' },
+  { value: 'detailed', label: 'Detailed' },
+  { value: 'step-by-step', label: 'Step-by-step' },
+  { value: 'code-first', label: 'Code-first' },
+];
+
+const TONE_OPTIONS: Array<{ value: ResponseTone; label: string }> = [
+  { value: 'neutral', label: 'Neutral' },
+  { value: 'technical', label: 'Technical' },
+  { value: 'friendly', label: 'Friendly' },
+  { value: 'executive', label: 'Executive' },
+];
+
+const RECENCY_OPTIONS: Array<{ value: SearchRecency; label: string }> = [
+  { value: 'any', label: 'Any time' },
+  { value: 'day', label: 'Past 24h' },
+  { value: 'week', label: 'Past week' },
+  { value: 'month', label: 'Past month' },
 ];
 
 const ACCEPTED_EXTENSIONS =
@@ -98,6 +167,14 @@ export function Composer({
   onStop,
   isStreaming,
   contextTokensEstimate,
+  searchMode,
+  onChangeSearchMode,
+  searchRecency,
+  onChangeSearchRecency,
+  responseStyle,
+  onChangeResponseStyle,
+  tone,
+  onChangeTone,
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -105,6 +182,7 @@ export function Composer({
 
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [isListening, setIsListening] = useState(false);
 
   const micSupported = supportsSpeechRecognition();
@@ -122,7 +200,11 @@ export function Composer({
     : SLASH_COMMANDS;
 
   const showSlashMenu =
-    slashOpen || (value.startsWith('/') && !value.includes('\n') && value.length < 16 && filteredCommands.length > 0);
+    slashOpen ||
+    (value.startsWith('/') &&
+      !value.includes('\n') &&
+      value.length < 16 &&
+      filteredCommands.length > 0);
 
   const adjustHeight = () => {
     const el = textareaRef.current;
@@ -132,7 +214,12 @@ export function Composer({
   };
 
   const applySlashCommand = (cmd: SlashCommand) => {
-    onChange(cmd.template);
+    if (cmd.switchSearchMode) {
+      onChangeSearchMode(cmd.switchSearchMode);
+      onChange('');
+    } else {
+      onChange(cmd.template);
+    }
     setSlashOpen(false);
     setSlashIndex(0);
     requestAnimationFrame(() => {
@@ -152,7 +239,6 @@ export function Composer({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    // Prevent premature submit during IME composition in Safari/Firefox/Chrome
     if (e.nativeEvent.isComposing || e.keyCode === 229) {
       return;
     }
@@ -187,6 +273,7 @@ export function Composer({
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (!isStreaming && (value.trim() || attachments.length > 0)) {
+        setOptionsOpen(false);
         onSend();
         if (textareaRef.current) {
           textareaRef.current.style.height = 'auto';
@@ -273,6 +360,18 @@ export function Composer({
   const canSend =
     !isStreaming && (value.trim().length > 0 || attachments.length > 0);
 
+  const hasCustomOptions =
+    responseStyle !== 'balanced' ||
+    tone !== 'neutral' ||
+    (searchMode !== 'off' && searchRecency !== 'any');
+
+  const placeholderText =
+    searchMode === 'deep'
+      ? 'Ask Ashutosh GPT to deep-research any topic…'
+      : searchMode === 'web'
+        ? 'Search the live web with Ashutosh GPT…'
+        : 'Message Ashutosh GPT (type / for templates)…';
+
   return (
     <div className="w-full max-w-3xl mx-auto relative no-print">
       {/* Slash Command Menu */}
@@ -283,11 +382,12 @@ export function Composer({
           className="absolute bottom-full left-0 right-0 mb-2 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#1b1b1e] shadow-xl overflow-hidden z-20"
         >
           <div className="px-3 py-1.5 border-b border-zinc-200 dark:border-zinc-800 text-[11px] font-medium text-zinc-400">
-            Prompt Templates
+            Prompt Templates &amp; Modes
           </div>
-          <div className="max-h-56 overflow-y-auto p-1">
+          <div className="max-h-60 overflow-y-auto p-1">
             {filteredCommands.map((cmd, idx) => {
-              const active = idx === Math.min(slashIndex, filteredCommands.length - 1);
+              const active =
+                idx === Math.min(slashIndex, filteredCommands.length - 1);
               return (
                 <button
                   key={cmd.command}
@@ -313,6 +413,102 @@ export function Composer({
             })}
           </div>
         </div>
+      )}
+
+      {/* Convenient Chat Options Popover */}
+      {optionsOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-10"
+            onClick={() => setOptionsOpen(false)}
+          />
+          <div className="absolute bottom-full right-0 mb-2 w-full sm:w-[360px] rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#1b1b1e] shadow-xl p-3.5 space-y-3.5 z-20">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-zinc-800 dark:text-zinc-100">
+                Chat &amp; Search Options
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  onChangeResponseStyle('balanced');
+                  onChangeTone('neutral');
+                  onChangeSearchRecency('any');
+                }}
+                className="text-[11px] text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+              >
+                Reset
+              </button>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+                Response Style
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {STYLE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => onChangeResponseStyle(opt.value)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                      responseStyle === opt.value
+                        ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900'
+                        : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+                Tone
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {TONE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => onChangeTone(opt.value)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                      tone === opt.value
+                        ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900'
+                        : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {searchMode !== 'off' && (
+              <div className="space-y-1.5 pt-1 border-t border-zinc-200 dark:border-zinc-800">
+                <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+                  Search Timeframe
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {RECENCY_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => onChangeSearchRecency(opt.value)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                        searchRecency === opt.value
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </>
       )}
 
       <div className="rounded-2xl border border-zinc-200 dark:border-zinc-700/80 bg-zinc-50 dark:bg-[#212124] shadow-sm focus-within:border-zinc-400 dark:focus-within:border-zinc-500 transition-colors">
@@ -347,13 +543,13 @@ export function Composer({
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           rows={1}
-          placeholder="Message deepseek-v4.1-flash-free (type / for templates)..."
+          placeholder={placeholderText}
           aria-label="Message input"
           className="w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-[15px] leading-relaxed text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none max-h-[200px]"
         />
 
-        <div className="flex items-center justify-between px-3 pb-2.5 pt-1 gap-2">
-          <div className="flex items-center gap-1 min-w-0">
+        <div className="flex flex-wrap items-center justify-between px-3 pb-2.5 pt-1 gap-2">
+          <div className="flex flex-wrap items-center gap-1 min-w-0">
             <input
               ref={fileInputRef}
               type="file"
@@ -366,24 +562,76 @@ export function Composer({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               title="Attach text, code, markdown, or CSV files"
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0"
             >
               <Paperclip className="w-4 h-4" />
-              <span className="hidden sm:inline">Attach</span>
+              <span className="hidden md:inline">Attach</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                onChangeSearchMode(searchMode === 'web' ? 'off' : 'web')
+              }
+              title="Toggle live Web Search"
+              aria-pressed={searchMode === 'web'}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                searchMode === 'web'
+                  ? 'bg-emerald-600/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                  : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 border border-transparent'
+              }`}
+            >
+              <Globe className="w-3.5 h-3.5" />
+              <span>Web Search</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                onChangeSearchMode(searchMode === 'deep' ? 'off' : 'deep')
+              }
+              title="Multi-query Deep Search & page analysis"
+              aria-pressed={searchMode === 'deep'}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                searchMode === 'deep'
+                  ? 'bg-emerald-600 text-white'
+                  : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800'
+              }`}
+            >
+              <Compass className="w-3.5 h-3.5" />
+              <span>Deep Search</span>
             </button>
 
             <button
               type="button"
               onClick={() => setSlashOpen((o) => !o)}
               title="Prompt templates (/)"
-              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+              className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                 showSlashMenu
                   ? 'bg-zinc-200/80 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100'
                   : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800'
               }`}
             >
               <Slash className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Prompts</span>
+              <span className="hidden lg:inline">Prompts</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setOptionsOpen((o) => !o)}
+              title="Response style, tone & search timeframe"
+              className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                optionsOpen || hasCustomOptions
+                  ? 'bg-zinc-200/80 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100'
+                  : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-200/70 dark:hover:bg-zinc-800'
+              }`}
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">
+                {responseStyle !== 'balanced'
+                  ? STYLE_OPTIONS.find((s) => s.value === responseStyle)?.label
+                  : 'Options'}
+              </span>
             </button>
 
             {micSupported && (
@@ -391,7 +639,9 @@ export function Composer({
                 type="button"
                 onClick={toggleVoiceInput}
                 title={isListening ? 'Stop voice dictation' : 'Voice dictation'}
-                aria-label={isListening ? 'Stop voice dictation' : 'Voice dictation'}
+                aria-label={
+                  isListening ? 'Stop voice dictation' : 'Voice dictation'
+                }
                 className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                   isListening
                     ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
@@ -403,18 +653,17 @@ export function Composer({
                 ) : (
                   <Mic className="w-4 h-4" />
                 )}
-                {isListening && <span className="hidden sm:inline">Listening</span>}
               </button>
-            )}
-
-            {totalEstimated > 0 && (
-              <span className="hidden sm:inline ml-1 text-[11px] font-mono tabular-nums text-zinc-400 dark:text-zinc-500 truncate">
-                ~{formatCompactNumber(totalEstimated)} / 198K ctx
-              </span>
             )}
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0 ml-auto">
+            {totalEstimated > 0 && (
+              <span className="hidden sm:inline text-[11px] font-mono tabular-nums text-zinc-400 dark:text-zinc-500">
+                ~{formatCompactNumber(totalEstimated)} / 198K
+              </span>
+            )}
+
             {isStreaming ? (
               <button
                 type="button"
@@ -430,6 +679,7 @@ export function Composer({
                 type="button"
                 disabled={!canSend}
                 onClick={() => {
+                  setOptionsOpen(false);
                   onSend();
                   if (textareaRef.current) {
                     textareaRef.current.style.height = 'auto';
@@ -451,7 +701,7 @@ export function Composer({
       </div>
 
       <p className="mt-2 text-center text-[11px] text-zinc-400 dark:text-zinc-500">
-        deepseek-v4.1-flash-free · Drag &amp; drop files · Shift+Enter for new line
+        Ashutosh GPT · Paste URLs or enable Web/Deep Search · Shift+Enter for new line
       </p>
     </div>
   );

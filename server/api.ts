@@ -3,6 +3,18 @@ import type { Express, Request, Response } from "express";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  formatSourcesForSystemPrompt,
+  runWebSearchPipeline,
+  type SearchMode,
+  type SearchProgressEvent,
+  type SearchRecency,
+} from "./search.ts";
+import {
+  isVerifiedAdmin,
+  resolveRequestUser,
+  type VerifiedUser,
+} from "./auth.ts";
 
 const UPSTREAM_BASE = "https://100milionseek.top";
 const DEFAULT_MODEL = "deepseek-v4.1-flash-free";
@@ -66,7 +78,7 @@ export interface PublicKeyMetric {
 function maskApiKey(key: string): string {
   const trimmed = key.trim();
   if (trimmed.length <= 12) return "hms-***";
-  return `${trimmed.slice(0, 8)}…${trimmed.slice(-4)}`;
+  return `${trimmed.slice(0, 8)}...${trimmed.slice(-4)}`;
 }
 
 function getKeyStorePaths(): string[] {
@@ -459,7 +471,7 @@ function selectNextKey(excludeIds: Set<string>): InternalKeyEntry | null {
   return candidates[0];
 }
 
-function forwardPoolHeaders(res: Response, activeKey?: InternalKeyEntry) {
+function forwardPoolHeaders(res: Response) {
   const totals = computePoolTotals();
   if (totals.quota.limit !== null) {
     res.setHeader("x-quota-limit", String(totals.quota.limit));
@@ -476,9 +488,85 @@ function forwardPoolHeaders(res: Response, activeKey?: InternalKeyEntry) {
   if (totals.quota.qos) {
     res.setHeader("x-qos", totals.quota.qos);
   }
-  if (activeKey) {
-    res.setHeader("x-active-key-label", activeKey.label);
+}
+
+interface ServerUserRuntimeMetric {
+  uid: string;
+  email: string;
+  displayName: string;
+  isGuest: boolean;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  webSearches: number;
+  deepSearches: number;
+  lastModel: string;
+  lastSearchMode: SearchMode;
+  lastActiveAt: number;
+}
+
+const serverStartedAt = Date.now();
+const serverUserUsageMap = new Map<string, ServerUserRuntimeMetric>();
+
+function recordServerUserUsage(
+  user: VerifiedUser | null,
+  details: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    searchMode: SearchMode;
+    model: string;
+  },
+) {
+  const uid = user?.uid || "guest";
+  const existing = serverUserUsageMap.get(uid);
+  const next: ServerUserRuntimeMetric = existing || {
+    uid,
+    email: user?.email || "guest",
+    displayName: user?.name || (user ? "Google User" : "Guest (Unauthenticated)"),
+    isGuest: !user,
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    webSearches: 0,
+    deepSearches: 0,
+    lastModel: details.model,
+    lastSearchMode: details.searchMode,
+    lastActiveAt: Date.now(),
+  };
+
+  if (user?.email) next.email = user.email;
+  if (user?.name) next.displayName = user.name;
+  next.requests += 1;
+  next.promptTokens += Math.max(0, details.promptTokens);
+  next.completionTokens += Math.max(0, details.completionTokens);
+  next.totalTokens += Math.max(0, details.totalTokens);
+  if (details.searchMode === "web") next.webSearches += 1;
+  if (details.searchMode === "deep") next.deepSearches += 1;
+  next.lastModel = details.model;
+  next.lastSearchMode = details.searchMode;
+  next.lastActiveAt = Date.now();
+  serverUserUsageMap.set(uid, next);
+}
+
+async function requireAdmin(
+  req: Request,
+  res: Response,
+): Promise<VerifiedUser | null> {
+  const user = await resolveRequestUser(req);
+  if (!isVerifiedAdmin(user)) {
+    res.status(403).json({
+      error: {
+        message:
+          "Admin access required. Only the main administrator (8887ashu@gmail.com) can access API key settings and admin analytics.",
+        code: "admin_only",
+      },
+    });
+    return null;
   }
+  return user;
 }
 
 export function registerApiRoutes(app: Express): void {
@@ -489,7 +577,7 @@ export function registerApiRoutes(app: Express): void {
     const pool = syncKeyPool();
     res.json({
       ok: true,
-      service: "seekchat",
+      service: "ashutosh-gpt",
       model: DEFAULT_MODEL,
       configuredKeys: pool.length,
       maxKeys: MAX_POOL_KEYS,
@@ -497,14 +585,19 @@ export function registerApiRoutes(app: Express): void {
     });
   });
 
-  // Live model pricing/costing + pooled quota & per-key metrics
-  app.get("/api/quota", async (_req: Request, res: Response) => {
+  // Live model pricing/costing + pooled quota (per-key details returned to verified admin only)
+  app.get("/api/quota", async (req: Request, res: Response) => {
     try {
+      const caller = await resolveRequestUser(req);
+      const admin = isVerifiedAdmin(caller);
       await refreshAllKeys();
       const totals = computePoolTotals();
       res.json({
+        isAdmin: admin,
         models: cachedModels,
-        ...totals,
+        quota: totals.quota,
+        poolSummary: totals.poolSummary,
+        keys: admin ? totals.keys : [],
       });
     } catch (err) {
       res.status(502).json({
@@ -517,8 +610,39 @@ export function registerApiRoutes(app: Express): void {
     }
   });
 
-  // Bulk-add up to 100 API keys to the server-side pool
+  // Admin-only server runtime usage & key pool overview
+  app.get("/api/admin/server-stats", async (req: Request, res: Response) => {
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
+    try {
+      await refreshAllKeys();
+      const totals = computePoolTotals();
+      const liveUsers = Array.from(serverUserUsageMap.values()).sort(
+        (a, b) => b.totalTokens - a.totalTokens || b.lastActiveAt - a.lastActiveAt,
+      );
+      res.json({
+        adminEmail: admin.email,
+        serverStartedAt,
+        uptimeSeconds: Math.floor((Date.now() - serverStartedAt) / 1000),
+        models: cachedModels,
+        liveUsers,
+        ...totals,
+      });
+    } catch (err) {
+      res.status(502).json({
+        error: {
+          message:
+            err instanceof Error ? err.message : "Failed to load admin server stats",
+        },
+      });
+    }
+  });
+
+  // Bulk-add up to 100 API keys to the server-side pool (Admin only)
   app.post("/api/keys", async (req: Request, res: Response) => {
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
+
     const rawKeysInput = req.body?.keys;
     let parsedList: string[] = [];
 
@@ -586,8 +710,11 @@ export function registerApiRoutes(app: Express): void {
     });
   });
 
-  // Remove a single settings-added key by ID (e.g. key-2)
-  app.delete("/api/keys/:id", (req: Request, res: Response) => {
+  // Remove a single settings-added key by ID (Admin only)
+  app.delete("/api/keys/:id", async (req: Request, res: Response) => {
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
+
     const { id } = req.params;
     const pool = syncKeyPool();
     const target = pool.find((k) => k.id === id);
@@ -614,8 +741,11 @@ export function registerApiRoutes(app: Express): void {
     res.json({ removed: target.label, ...totals });
   });
 
-  // Clear all settings-added keys
-  app.delete("/api/keys", (_req: Request, res: Response) => {
+  // Clear all settings-added keys (Admin only)
+  app.delete("/api/keys", async (req: Request, res: Response) => {
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
+
     saveCustomKeys([]);
     const totals = computePoolTotals();
     res.json({ cleared: true, ...totals });
@@ -645,8 +775,116 @@ export function registerApiRoutes(app: Express): void {
     }
   });
 
-  // Chat completions proxy with multi-key load balancing & 429 failover
+  // Helper: quick non-streaming query planning for Deep Search
+  async function planDeepSearchQueries(
+    userQuery: string,
+    signal: AbortSignal,
+  ): Promise<string[]> {
+    const candidate = selectNextKey(new Set());
+    if (!candidate) return [userQuery];
+
+    candidate.inFlight += 1;
+    candidate.requestsTotal += 1;
+    candidate.lastUsedAt = Date.now();
+
+    try {
+      const resp = await fetch(`${UPSTREAM_BASE}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${candidate.secret}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: DEFAULT_MODEL,
+          stream: false,
+          temperature: 0.2,
+          max_tokens: 180,
+          messages: [
+            {
+              role: "system",
+              content:
+                "Generate 3 concise, distinct web search queries to thoroughly research the user's request from multiple angles. Return ONLY a JSON array of strings, nothing else.",
+            },
+            {
+              role: "user",
+              content: userQuery,
+            },
+          ],
+        }),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(6000)]),
+      });
+      updateEntryFromHeaders(candidate, resp.headers);
+      if (!resp.ok) {
+        candidate.requestsFailed += 1;
+        return [userQuery];
+      }
+      const data = await resp.json().catch(() => null);
+      candidate.requestsOk += 1;
+      if (typeof data?.usage?.total_tokens === "number") {
+        candidate.sessionTokensUsed += data.usage.total_tokens;
+      }
+      const raw = String(data?.choices?.[0]?.message?.content || "").trim();
+      const jsonMatch = raw.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        const arr = JSON.parse(jsonMatch[0]);
+        if (Array.isArray(arr)) {
+          const cleaned = arr
+            .filter((x): x is string => typeof x === "string")
+            .map((x) => x.trim())
+            .filter(Boolean)
+            .slice(0, 3);
+          if (cleaned.length > 0) return cleaned;
+        }
+      }
+      const lines = raw
+        .split("\n")
+        .map((l) => l.replace(/^[-*\d.)\s]+/, "").replace(/^["']|["']$/g, "").trim())
+        .filter((l) => l.length > 3 && l.length < 140)
+        .slice(0, 3);
+      return lines.length > 0 ? lines : [userQuery];
+    } catch {
+      return [userQuery];
+    } finally {
+      candidate.inFlight = Math.max(0, candidate.inFlight - 1);
+    }
+  }
+
+  function buildStyleInstruction(
+    responseStyle?: string,
+    tone?: string,
+  ): string {
+    const hints: string[] = [];
+    switch (responseStyle) {
+      case "concise":
+        hints.push("Keep your response crisp, concise, and direct with minimal filler.");
+        break;
+      case "detailed":
+        hints.push("Provide a thorough, comprehensive explanation with clear headings, examples, and nuances.");
+        break;
+      case "step-by-step":
+        hints.push("Break down your answer into clear numbered step-by-step instructions.");
+        break;
+      case "code-first":
+        hints.push("Prioritize clean, runnable code examples up front followed by brief, practical explanations.");
+        break;
+    }
+    switch (tone) {
+      case "technical":
+        hints.push("Use precise engineering terminology and exact technical depth.");
+        break;
+      case "friendly":
+        hints.push("Use a warm, approachable, easy-to-follow conversational tone.");
+        break;
+      case "executive":
+        hints.push("Lead with key takeaways and bottom-line recommendations suitable for decision makers.");
+        break;
+    }
+    return hints.join(" ");
+  }
+
+  // Chat completions proxy with multi-key load balancing, 429 failover, Web Search & Deep Search
   app.post("/api/chat", async (req: Request, res: Response) => {
+    const callerUser = await resolveRequestUser(req);
     const {
       messages,
       model = DEFAULT_MODEL,
@@ -654,6 +892,10 @@ export function registerApiRoutes(app: Express): void {
       temperature,
       max_tokens,
       top_p,
+      searchMode = "off",
+      searchRecency = "any",
+      responseStyle = "balanced",
+      tone = "neutral",
     } = req.body || {};
 
     if (!Array.isArray(messages) || messages.length === 0) {
@@ -666,6 +908,19 @@ export function registerApiRoutes(app: Express): void {
       return;
     }
 
+    const activeSearchMode: SearchMode =
+      searchMode === "deep"
+        ? "deep"
+        : searchMode === "web"
+          ? "web"
+          : "off";
+    const activeRecency: SearchRecency =
+      searchRecency === "day" ||
+      searchRecency === "week" ||
+      searchRecency === "month"
+        ? searchRecency
+        : "any";
+
     const abortController = new AbortController();
     res.on("close", () => {
       if (!res.writableEnded) {
@@ -673,10 +928,110 @@ export function registerApiRoutes(app: Express): void {
       }
     });
 
+    const isStreaming = Boolean(stream);
+    let sseHeadersSent = false;
+
+    const ensureSseHeaders = () => {
+      if (!sseHeadersSent && isStreaming && !res.headersSent) {
+        res.status(200);
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.flushHeaders();
+        sseHeadersSent = true;
+      }
+    };
+
+    const writeSseMeta = (meta: SearchProgressEvent) => {
+      if (!isStreaming || res.writableEnded) return;
+      ensureSseHeaders();
+      res.write(`data: ${JSON.stringify({ ashutosh_meta: meta })}\n\n`);
+    };
+
+    const finalMessages: Array<{ role: string; content: string }> = messages.map(
+      (m: { role: string; content: string }) => ({
+        role: String(m.role),
+        content: String(m.content || ""),
+      }),
+    );
+
+    const styleHint = buildStyleInstruction(
+      typeof responseStyle === "string" ? responseStyle : undefined,
+      typeof tone === "string" ? tone : undefined,
+    );
+    if (styleHint) {
+      finalMessages.unshift({
+        role: "system",
+        content: styleHint,
+      });
+    }
+
+    let searchMetaResult: SearchProgressEvent | null = null;
+
+    if (activeSearchMode !== "off") {
+      const lastUserMsg = [...finalMessages]
+        .reverse()
+        .find((m) => m.role === "user");
+      const searchInput = lastUserMsg?.content?.trim() || "";
+
+      if (searchInput) {
+        if (isStreaming) {
+          ensureSseHeaders();
+        }
+        try {
+          const { queries, sources } = await runWebSearchPipeline({
+            userQuery: searchInput,
+            mode: activeSearchMode,
+            recency: activeRecency,
+            planQueriesFn:
+              activeSearchMode === "deep"
+                ? (q) => planDeepSearchQueries(q, abortController.signal)
+                : undefined,
+            onProgress: (evt) => {
+              writeSseMeta(evt);
+            },
+            signal: abortController.signal,
+          });
+
+          const publicSources = sources.map((s) => ({
+            title: s.title,
+            url: s.url,
+            domain: s.domain,
+            snippet: s.snippet,
+            fetchedExcerpt: s.fetchedExcerpt,
+          }));
+
+          searchMetaResult = {
+            stage: "done",
+            queries,
+            sourcesCount: publicSources.length,
+            pagesRead: publicSources.filter((s) => s.fetchedExcerpt).length,
+            sources: publicSources,
+          };
+
+          const groundedSystemPrompt = formatSourcesForSystemPrompt(
+            sources,
+            activeSearchMode,
+            queries,
+          );
+          finalMessages.unshift({
+            role: "system",
+            content: groundedSystemPrompt,
+          });
+        } catch (searchErr) {
+          if ((searchErr as Error)?.name === "AbortError") {
+            if (!res.writableEnded) res.end();
+            return;
+          }
+        }
+      }
+    }
+
     const payload: Record<string, unknown> = {
       model,
-      messages,
-      stream: Boolean(stream),
+      messages: finalMessages,
+      stream: isStreaming,
     };
     if (typeof temperature === "number") {
       payload.temperature = temperature;
@@ -779,18 +1134,23 @@ export function registerApiRoutes(app: Express): void {
     }
 
     if (!upstream || !chosenKey) {
-      forwardPoolHeaders(res);
-      if (!lastErrorData) {
-        res.status(429).json({
-          error: {
-            message:
-              "All configured API keys are currently exhausted, busy (5 concurrent streams each), or invalid. Check Settings → API Keys Pool.",
-            code: "all_keys_unavailable",
-          },
-        });
+      const fallbackErr = lastErrorData || {
+        error: {
+          message:
+            "All configured API keys are currently exhausted, busy (5 concurrent streams each), or invalid. Check Settings → API Keys Pool.",
+          code: "all_keys_unavailable",
+        },
+      };
+      if (sseHeadersSent || res.headersSent) {
+        if (!res.writableEnded) {
+          res.write(`data: ${JSON.stringify(fallbackErr)}\n\n`);
+          res.write("data: [DONE]\n\n");
+          res.end();
+        }
         return;
       }
-      res.status(lastErrorStatus).json(lastErrorData);
+      forwardPoolHeaders(res);
+      res.status(lastErrorData ? lastErrorStatus : 429).json(fallbackErr);
       return;
     }
 
@@ -804,26 +1164,45 @@ export function registerApiRoutes(app: Express): void {
     };
 
     try {
-      forwardPoolHeaders(res, activeEntry);
+      if (!sseHeadersSent && !res.headersSent) {
+        forwardPoolHeaders(res);
+      }
 
-      if (!stream) {
+      if (!isStreaming) {
         const json = await upstream.json();
         activeEntry.requestsOk += 1;
         activeEntry.lastError = null;
-        if (typeof json?.usage?.total_tokens === "number") {
-          activeEntry.sessionTokensUsed += json.usage.total_tokens;
+        const promptTok =
+          typeof json?.usage?.prompt_tokens === "number"
+            ? json.usage.prompt_tokens
+            : 0;
+        const completionTok =
+          typeof json?.usage?.completion_tokens === "number"
+            ? json.usage.completion_tokens
+            : 0;
+        const totalTok =
+          typeof json?.usage?.total_tokens === "number"
+            ? json.usage.total_tokens
+            : promptTok + completionTok;
+        if (totalTok > 0) {
+          activeEntry.sessionTokensUsed += totalTok;
+        }
+        recordServerUserUsage(callerUser, {
+          promptTokens: promptTok,
+          completionTokens: completionTok,
+          totalTokens: totalTok,
+          searchMode: activeSearchMode,
+          model: String(model || DEFAULT_MODEL),
+        });
+        if (searchMetaResult && json && typeof json === "object") {
+          json.ashutosh_meta = searchMetaResult;
         }
         releaseSlot();
         res.json(json);
         return;
       }
 
-      res.status(200);
-      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache, no-transform");
-      res.setHeader("Connection", "keep-alive");
-      res.setHeader("X-Accel-Buffering", "no");
-      res.flushHeaders();
+      ensureSseHeaders();
 
       if (!upstream.body) {
         activeEntry.requestsOk += 1;
@@ -842,25 +1221,51 @@ export function registerApiRoutes(app: Express): void {
           const { done, value } = await reader.read();
           if (done) break;
           const chunk = decoder.decode(value, { stream: true });
-          streamTailBuffer = (streamTailBuffer + chunk).slice(-512);
+          streamTailBuffer = (streamTailBuffer + chunk).slice(-768);
           if (!res.writableEnded) {
             res.write(chunk);
           }
         }
         const tail = decoder.decode();
         if (tail) {
-          streamTailBuffer = (streamTailBuffer + tail).slice(-512);
+          streamTailBuffer = (streamTailBuffer + tail).slice(-768);
           if (!res.writableEnded) {
             res.write(tail);
           }
         }
 
-        const usageMatch = streamTailBuffer.match(
-          /"usage"\s*:\s*\{[^}]*"total_tokens"\s*:\s*(\d+)/,
+        const usageJsonMatch = streamTailBuffer.match(
+          /"usage"\s*:\s*(\{[^}]+\})/,
         );
-        if (usageMatch) {
-          activeEntry.sessionTokensUsed += Number(usageMatch[1]);
+        let promptTok = 0;
+        let completionTok = 0;
+        let totalTok = 0;
+        if (usageJsonMatch) {
+          try {
+            const parsedUsage = JSON.parse(usageJsonMatch[1]) as {
+              prompt_tokens?: number;
+              completion_tokens?: number;
+              total_tokens?: number;
+            };
+            promptTok = Number(parsedUsage.prompt_tokens || 0);
+            completionTok = Number(parsedUsage.completion_tokens || 0);
+            totalTok = Number(
+              parsedUsage.total_tokens || promptTok + completionTok,
+            );
+          } catch {
+            // Ignore malformed tail match
+          }
         }
+        if (totalTok > 0) {
+          activeEntry.sessionTokensUsed += totalTok;
+        }
+        recordServerUserUsage(callerUser, {
+          promptTokens: promptTok,
+          completionTokens: completionTok,
+          totalTokens: totalTok,
+          searchMode: activeSearchMode,
+          model: String(model || DEFAULT_MODEL),
+        });
 
         activeEntry.requestsOk += 1;
         activeEntry.lastError = null;

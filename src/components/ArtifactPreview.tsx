@@ -45,7 +45,7 @@ export function ArtifactPreview({ artifact, onClose }: ArtifactPreviewProps) {
       artifact.language === 'svg'
         ? 'image/svg+xml;charset=utf-8'
         : 'text/html;charset=utf-8';
-    downloadFile(`seekchat-preview.${ext}`, artifact.code, mime);
+    downloadFile(`ashutosh-gpt-preview.${ext}`, artifact.code, mime);
   };
 
   return (

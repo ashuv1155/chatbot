@@ -12,6 +12,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
+import type { User } from 'firebase/auth';
 import type {
   ChatSettings,
   KeyMetric,
@@ -19,10 +20,13 @@ import type {
   PoolSummary,
   QuotaInfo,
 } from '../types/chat';
+import { getAuthHeaders } from '../lib/admin';
 import { DEFAULT_SETTINGS, formatCompactNumber } from '../lib/storage';
 
 interface SettingsModalProps {
   isOpen: boolean;
+  isAdmin: boolean;
+  authUser: User | null;
   settings: ChatSettings;
   keys: KeyMetric[];
   poolSummary: PoolSummary | null;
@@ -102,6 +106,8 @@ function renderStatusLabel(status: KeyStatus) {
 
 export function SettingsModal({
   isOpen,
+  isAdmin,
+  authUser,
   settings,
   keys,
   poolSummary,
@@ -135,14 +141,17 @@ export function SettingsModal({
   const remainingCapacity = Math.max(0, 100 - totalKeys);
   const settingsAddedCount = keys.filter((k) => k.source === 'settings').length;
 
+  const effectiveTab = isAdmin ? activeTab : 'model';
+
   const handleAddKeys = async () => {
-    if (!bulkInput.trim() || busy) return;
+    if (!isAdmin || !bulkInput.trim() || busy) return;
     setBusy(true);
     setFeedback(null);
     try {
+      const authHeaders = await getAuthHeaders(authUser);
       const res = await fetch('/api/keys', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
         body: JSON.stringify({ keys: bulkInput }),
       });
       const data = await res.json();
@@ -174,12 +183,14 @@ export function SettingsModal({
   };
 
   const handleDeleteKey = async (id: string) => {
-    if (busy) return;
+    if (!isAdmin || busy) return;
     setBusy(true);
     setFeedback(null);
     try {
+      const authHeaders = await getAuthHeaders(authUser);
       const res = await fetch(`/api/keys/${encodeURIComponent(id)}`, {
         method: 'DELETE',
+        headers: authHeaders,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -199,11 +210,15 @@ export function SettingsModal({
   };
 
   const handleClearAdded = async () => {
-    if (busy || settingsAddedCount === 0) return;
+    if (!isAdmin || busy || settingsAddedCount === 0) return;
     setBusy(true);
     setFeedback(null);
     try {
-      const res = await fetch('/api/keys', { method: 'DELETE' });
+      const authHeaders = await getAuthHeaders(authUser);
+      const res = await fetch('/api/keys', {
+        method: 'DELETE',
+        headers: authHeaders,
+      });
       const data = await res.json();
       if (res.ok) {
         onPoolUpdated(data);
@@ -240,32 +255,39 @@ export function SettingsModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-200 dark:border-zinc-800 gap-4">
-          <div className="flex items-center gap-1 p-1 rounded-xl bg-zinc-100 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800">
-            <button
-              type="button"
-              onClick={() => setActiveTab('model')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'model'
-                  ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-xs'
-                  : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
-              }`}
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-              <span>Model &amp; Prompt</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('keys')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 tabular-nums ${
-                activeTab === 'keys'
-                  ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-xs'
-                  : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
-              }`}
-            >
-              <KeyRound className="w-3.5 h-3.5" />
-              <span>API Keys Pool ({totalKeys}/100)</span>
-            </button>
-          </div>
+          {isAdmin ? (
+            <div className="flex items-center gap-1 p-1 rounded-xl bg-zinc-100 dark:bg-zinc-900 border border-zinc-200/80 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setActiveTab('model')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  effectiveTab === 'model'
+                    ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-xs'
+                    : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+                }`}
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span>Model &amp; Prompt</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('keys')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 tabular-nums ${
+                  effectiveTab === 'keys'
+                    ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-xs'
+                    : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+                }`}
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>API Keys Pool ({totalKeys}/100)</span>
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              <SlidersHorizontal className="w-4 h-4 text-zinc-500" />
+              <span>Chat &amp; Model Settings</span>
+            </div>
+          )}
 
           <button
             type="button"
@@ -277,7 +299,7 @@ export function SettingsModal({
           </button>
         </div>
 
-        {activeTab === 'model' ? (
+        {effectiveTab === 'model' ? (
           <>
             <div className="p-5 space-y-5 max-h-[72vh] overflow-y-auto">
               <div className="space-y-2">
@@ -381,6 +403,122 @@ export function SettingsModal({
                   <span>32,768</span>
                   <span>65,536 (64K max)</span>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                    Default Search Mode
+                  </label>
+                  <select
+                    value={draft.defaultSearchMode}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        defaultSearchMode: e.target.value as ChatSettings['defaultSearchMode'],
+                      }))
+                    }
+                    className="w-full rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-zinc-400"
+                  >
+                    <option value="off">Direct Chat (No Search)</option>
+                    <option value="web">Web Search</option>
+                    <option value="deep">Deep Search (Multi-Query)</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                    Default Search Timeframe
+                  </label>
+                  <select
+                    value={draft.searchRecency}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        searchRecency: e.target.value as ChatSettings['searchRecency'],
+                      }))
+                    }
+                    className="w-full rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-zinc-400"
+                  >
+                    <option value="any">Any time</option>
+                    <option value="day">Past 24 hours</option>
+                    <option value="week">Past week</option>
+                    <option value="month">Past month</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                    Response Style
+                  </label>
+                  <select
+                    value={draft.responseStyle}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        responseStyle: e.target.value as ChatSettings['responseStyle'],
+                      }))
+                    }
+                    className="w-full rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-zinc-400"
+                  >
+                    <option value="balanced">Balanced</option>
+                    <option value="concise">Concise</option>
+                    <option value="detailed">Detailed</option>
+                    <option value="step-by-step">Step-by-step</option>
+                    <option value="code-first">Code-first</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                    Tone
+                  </label>
+                  <select
+                    value={draft.tone}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        tone: e.target.value as ChatSettings['tone'],
+                      }))
+                    }
+                    className="w-full rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 px-3 py-2 text-xs text-zinc-900 dark:text-zinc-100 focus:outline-none focus:border-zinc-400"
+                  >
+                    <option value="neutral">Neutral</option>
+                    <option value="technical">Technical</option>
+                    <option value="friendly">Friendly</option>
+                    <option value="executive">Executive</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-1">
+                <div>
+                  <div className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                    Quick follow-up suggestions
+                  </div>
+                  <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                    Show 1-click follow-up actions below the latest reply
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={draft.showFollowUps}
+                  onClick={() =>
+                    setDraft((d) => ({ ...d, showFollowUps: !d.showFollowUps }))
+                  }
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                    draft.showFollowUps
+                      ? 'bg-emerald-600'
+                      : 'bg-zinc-300 dark:bg-zinc-700'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                      draft.showFollowUps ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
               </div>
 
               <div className="flex items-center justify-between pt-1">

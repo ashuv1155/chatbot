@@ -4,15 +4,19 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Compass,
   Copy,
+  ExternalLink,
   FileText,
   GitBranch,
+  Globe,
+  Loader2,
   Pencil,
   RotateCcw,
   Square,
   Volume2,
 } from 'lucide-react';
-import type { ChatMessage, PreviewArtifact } from '../types/chat';
+import type { ChatMessage, PreviewArtifact, SearchMode } from '../types/chat';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { formatCompactNumber } from '../lib/storage';
 import {
@@ -25,28 +29,48 @@ import {
 interface MessageItemProps {
   message: ChatMessage;
   isLastAssistant: boolean;
+  showFollowUps: boolean;
   quotaMultiplier: number;
   onRegenerate: (messageId: string) => void;
   onBranchFromMessage: (messageId: string) => void;
   onEditUserMessage: (messageId: string, newContent: string) => void;
   onRetryError: (messageId: string) => void;
   onPreviewArtifact: (artifact: PreviewArtifact) => void;
+  onQuickFollowUp: (prompt: string, modeOverride?: SearchMode) => void;
+}
+
+function getSearchStageLabel(stage: string, sourcesCount: number, pagesRead?: number): string {
+  switch (stage) {
+    case 'planning':
+      return 'Planning multi-angle research queries…';
+    case 'searching':
+      return 'Searching live web sources…';
+    case 'reading':
+      return `Found ${sourcesCount} sources · Reading full pages…`;
+    case 'synthesizing':
+      return `Synthesizing answer from ${sourcesCount} sources${pagesRead ? ` (${pagesRead} pages read)` : ''}…`;
+    default:
+      return 'Researching…';
+  }
 }
 
 export function MessageItem({
   message,
   isLastAssistant,
+  showFollowUps,
   quotaMultiplier,
   onRegenerate,
   onBranchFromMessage,
   onEditUserMessage,
   onRetryError,
   onPreviewArtifact,
+  onQuickFollowUp,
 }: MessageItemProps) {
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState(message.content);
   const [showReasoning, setShowReasoning] = useState(false);
+  const [showSources, setShowSources] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
 
   const canSpeak = supportsSpeechSynthesis();
@@ -159,7 +183,12 @@ export function MessageItem({
               {message.content}
             </div>
 
-            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity pr-1 no-print">
+            <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity pr-1 no-print">
+              {message.searchMode && message.searchMode !== 'off' && (
+                <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                  {message.searchMode === 'deep' ? 'Deep Search' : 'Web Search'}
+                </span>
+              )}
               <button
                 type="button"
                 onClick={handleCopy}
@@ -190,6 +219,10 @@ export function MessageItem({
     );
   }
 
+  const activeSources = message.sources || [];
+  const activeQueries =
+    message.searchProgress?.queries || message.searchQueries || [];
+
   return (
     <div className="group flex items-start gap-3.5 sm:gap-4">
       <div
@@ -213,6 +246,93 @@ export function MessageItem({
       </div>
 
       <div className="flex-1 min-w-0">
+        {/* Live Web Search / Deep Search Progress */}
+        {message.isStreaming &&
+          message.searchProgress &&
+          message.searchProgress.stage !== 'done' && (
+            <div className="mb-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-900/60 p-3 space-y-2 text-xs">
+              <div className="flex items-center gap-2 font-medium text-zinc-700 dark:text-zinc-200">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <span>
+                  {getSearchStageLabel(
+                    message.searchProgress.stage,
+                    message.searchProgress.sourcesCount,
+                    message.searchProgress.pagesRead,
+                  )}
+                </span>
+              </div>
+              {activeQueries.length > 0 && (
+                <div className="text-[11px] text-zinc-500 dark:text-zinc-400 space-y-0.5">
+                  {activeQueries.map((q, i) => (
+                    <div key={i} className="truncate font-mono">
+                      · {q}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+        {/* Completed Sources Card Strip */}
+        {activeSources.length > 0 && (
+          <div className="mb-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/40 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setShowSources((s) => !s)}
+              className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100/70 dark:hover:bg-zinc-800/50 transition-colors"
+            >
+              <span className="inline-flex items-center gap-1.5">
+                {message.searchMode === 'deep' ? (
+                  <Compass className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                ) : (
+                  <Globe className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                )}
+                <span>
+                  Sources ({activeSources.length})
+                </span>
+                {activeQueries.length > 1 && (
+                  <span className="text-[11px] font-normal text-zinc-400">
+                    · {activeQueries.length} queries
+                  </span>
+                )}
+              </span>
+              {showSources ? (
+                <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+              ) : (
+                <ChevronRight className="w-3.5 h-3.5 text-zinc-400" />
+              )}
+            </button>
+
+            {showSources && (
+              <div className="px-3 pb-2.5 pt-1 grid grid-cols-1 sm:grid-cols-2 gap-1.5 border-t border-zinc-200/70 dark:border-zinc-800/70">
+                {activeSources.map((src, idx) => (
+                  <a
+                    key={src.url + idx}
+                    href={src.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group/src flex items-start justify-between gap-2 p-2 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900/80 hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-zinc-800 dark:text-zinc-200 truncate group-hover/src:text-emerald-600 dark:group-hover/src:text-emerald-400">
+                        <span className="font-mono text-[11px] text-zinc-400 mr-1.5 tabular-nums">
+                          [{idx + 1}]
+                        </span>
+                        {src.title}
+                      </div>
+                      <div className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate mt-0.5">
+                        {src.domain}
+                        {src.fetchedExcerpt ? ' · full page read' : ''}
+                      </div>
+                    </div>
+                    <ExternalLink className="w-3 h-3 text-zinc-400 shrink-0 mt-0.5" />
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {message.reasoning && (
           <div className="mb-3">
             <button
@@ -371,6 +491,64 @@ export function MessageItem({
             )}
           </div>
         )}
+
+        {/* Convenient 1-Click Follow-Up Actions on Latest Assistant Reply */}
+        {isLastAssistant &&
+          showFollowUps &&
+          !message.isStreaming &&
+          !message.error &&
+          message.content && (
+            <div className="mt-2.5 flex flex-wrap items-center gap-1.5 no-print">
+              <button
+                type="button"
+                onClick={() =>
+                  onQuickFollowUp(
+                    'Summarize that much more concisely into key bullet points.',
+                  )
+                }
+                className="px-2.5 py-1 rounded-lg border border-zinc-200 dark:border-zinc-800 text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0"
+              >
+                Make shorter
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  onQuickFollowUp(
+                    'Go deeper on this with concrete examples and edge cases.',
+                  )
+                }
+                className="px-2.5 py-1 rounded-lg border border-zinc-200 dark:border-zinc-800 text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0"
+              >
+                Go deeper
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  onQuickFollowUp(
+                    'Explain this simply with an intuitive real-world analogy.',
+                  )
+                }
+                className="px-2.5 py-1 rounded-lg border border-zinc-200 dark:border-zinc-800 text-[11px] font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0"
+              >
+                Explain simply
+              </button>
+              {message.searchMode !== 'deep' && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onQuickFollowUp(
+                      'Verify and expand on the latest facts above with live citations.',
+                      'web',
+                    )
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-zinc-200 dark:border-zinc-800 text-[11px] font-medium text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Globe className="w-3 h-3" />
+                  <span>Verify with Web</span>
+                </button>
+              )}
+            </div>
+          )}
       </div>
     </div>
   );

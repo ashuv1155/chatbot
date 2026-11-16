@@ -1,0 +1,320 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == '8887ashu@gmail.com';
+    }
+
+    function isNonNegNumber(val) {
+      return val is number && val >= 0 && val <= 100000000000;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid',
+          'displayName',
+          'email',
+          'photoURL',
+          'totalTokensUsed',
+          'promptTokensUsed',
+          'completionTokensUsed',
+          'dailyTokensUsed',
+          'usageDate',
+          'totalRequests',
+          'webSearchCount',
+          'deepSearchCount',
+          'conversationsCount',
+          'lastModelUsed',
+          'lastSearchMode',
+          'lastActiveAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.uid == userId
+        && isValidId(data.uid)
+        && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 120))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 254))
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 1024))
+        && (!('totalTokensUsed' in data) || isNonNegNumber(data.totalTokensUsed))
+        && (!('promptTokensUsed' in data) || isNonNegNumber(data.promptTokensUsed))
+        && (!('completionTokensUsed' in data) || isNonNegNumber(data.completionTokensUsed))
+        && (!('dailyTokensUsed' in data) || isNonNegNumber(data.dailyTokensUsed))
+        && (!('usageDate' in data) || (data.usageDate is string && data.usageDate.size() <= 16))
+        && (!('totalRequests' in data) || isNonNegNumber(data.totalRequests))
+        && (!('webSearchCount' in data) || isNonNegNumber(data.webSearchCount))
+        && (!('deepSearchCount' in data) || isNonNegNumber(data.deepSearchCount))
+        && (!('conversationsCount' in data) || isNonNegNumber(data.conversationsCount))
+        && (!('lastModelUsed' in data) || (data.lastModelUsed is string && data.lastModelUsed.size() <= 100))
+        && (!('lastSearchMode' in data) || data.lastSearchMode in ['off', 'web', 'deep'])
+        && (!('lastActiveAt' in data) || data.lastActiveAt is timestamp)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidConversation(data, userId, conversationId) {
+      return data.keys().hasAll(['id', 'ownerId', 'title', 'pinned', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'title', 'pinned', 'createdAt', 'updatedAt'])
+        && data.id == conversationId
+        && isValidId(data.id)
+        && data.ownerId == userId
+        && isValidId(data.ownerId)
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 200
+        && data.pinned is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAttachmentMeta(att) {
+      return att is map
+        && att.keys().hasAll(['id', 'name', 'size'])
+        && att.keys().hasOnly(['id', 'name', 'size'])
+        && isValidId(att.id)
+        && att.name is string
+        && att.name.size() >= 1
+        && att.name.size() <= 255
+        && att.size is number
+        && att.size >= 0
+        && att.size <= 2000000;
+    }
+
+    function isValidUsage(usage) {
+      return usage is map
+        && usage.keys().hasAll(['prompt_tokens', 'completion_tokens', 'total_tokens'])
+        && usage.keys().hasOnly(['prompt_tokens', 'completion_tokens', 'total_tokens'])
+        && usage.prompt_tokens is number
+        && usage.prompt_tokens >= 0
+        && usage.completion_tokens is number
+        && usage.completion_tokens >= 0
+        && usage.total_tokens is number
+        && usage.total_tokens >= 0;
+    }
+
+    function isValidSearchSource(src) {
+      return src is map
+        && src.keys().hasAll(['title', 'url', 'domain', 'snippet'])
+        && src.keys().hasOnly(['title', 'url', 'domain', 'snippet', 'fetchedExcerpt'])
+        && src.title is string && src.title.size() >= 1 && src.title.size() <= 240
+        && src.url is string && src.url.size() >= 1 && src.url.size() <= 2048
+        && src.domain is string && src.domain.size() >= 1 && src.domain.size() <= 255
+        && src.snippet is string && src.snippet.size() <= 1000
+        && (!('fetchedExcerpt' in src) || src.fetchedExcerpt is bool);
+    }
+
+    function isValidMessage(data, userId, conversationId, messageId) {
+      return data.keys().hasAll(['id', 'ownerId', 'conversationId', 'role', 'content', 'createdAt'])
+        && data.keys().hasOnly([
+          'id',
+          'ownerId',
+          'conversationId',
+          'role',
+          'content',
+          'reasoning',
+          'attachments',
+          'usage',
+          'aborted',
+          'error',
+          'searchMode',
+          'searchQueries',
+          'sources',
+          'createdAt'
+        ])
+        && data.id == messageId
+        && isValidId(data.id)
+        && data.ownerId == userId
+        && isValidId(data.ownerId)
+        && data.conversationId == conversationId
+        && isValidId(data.conversationId)
+        && data.role in ['user', 'assistant']
+        && data.content is string
+        && data.content.size() <= 400000
+        && (!('reasoning' in data) || (data.reasoning is string && data.reasoning.size() <= 200000))
+        && (!('error' in data) || (data.error is string && data.error.size() <= 2000))
+        && (!('aborted' in data) || data.aborted is bool)
+        && (!('attachments' in data) || (data.attachments is list && data.attachments.size() <= 10 && (data.attachments.size() == 0 || isValidAttachmentMeta(data.attachments[0]))))
+        && (!('usage' in data) || isValidUsage(data.usage))
+        && (!('searchMode' in data) || data.searchMode in ['off', 'web', 'deep'])
+        && (!('searchQueries' in data) || (data.searchQueries is list && data.searchQueries.size() <= 6 && (data.searchQueries.size() == 0 || (data.searchQueries[0] is string && data.searchQueries[0].size() <= 300))))
+        && (!('sources' in data) || (data.sources is list && data.sources.size() <= 12 && (data.sources.size() == 0 || isValidSearchSource(data.sources[0]))))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidUsageLog(data, logId) {
+      return data.keys().hasAll([
+          'id',
+          'userId',
+          'model',
+          'searchMode',
+          'promptTokens',
+          'completionTokens',
+          'totalTokens',
+          'status',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'userId',
+          'userEmail',
+          'userName',
+          'model',
+          'searchMode',
+          'responseStyle',
+          'tone',
+          'promptTokens',
+          'completionTokens',
+          'totalTokens',
+          'sourcesCount',
+          'status',
+          'errorMessage',
+          'createdAt'
+        ])
+        && data.id == logId
+        && isValidId(data.id)
+        && isValidId(data.userId)
+        && (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 254))
+        && (!('userName' in data) || (data.userName is string && data.userName.size() <= 120))
+        && data.model is string && data.model.size() >= 1 && data.model.size() <= 100
+        && data.searchMode in ['off', 'web', 'deep']
+        && (!('responseStyle' in data) || (data.responseStyle is string && data.responseStyle.size() <= 32))
+        && (!('tone' in data) || (data.tone is string && data.tone.size() <= 32))
+        && isNonNegNumber(data.promptTokens)
+        && isNonNegNumber(data.completionTokens)
+        && isNonNegNumber(data.totalTokens)
+        && (!('sourcesCount' in data) || isNonNegNumber(data.sourcesCount))
+        && data.status in ['completed', 'aborted', 'error']
+        && (!('errorMessage' in data) || (data.errorMessage is string && data.errorMessage.size() <= 500))
+        && data.createdAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isSignedIn()
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isOwner(userId) && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'photoURL', 'updatedAt', 'lastActiveAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly([
+              'totalTokensUsed',
+              'promptTokensUsed',
+              'completionTokensUsed',
+              'dailyTokensUsed',
+              'usageDate',
+              'totalRequests',
+              'webSearchCount',
+              'deepSearchCount',
+              'conversationsCount',
+              'lastModelUsed',
+              'lastSearchMode',
+              'lastActiveAt',
+              'updatedAt'
+            ])
+          ))
+          || isAdmin()
+        );
+      allow delete: if false;
+
+      match /conversations/{conversationId} {
+        allow get: if isValidId(userId) && isValidId(conversationId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(conversationId)
+          && isOwner(userId)
+          && isValidConversation(incoming(), userId, conversationId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(conversationId)
+          && isOwner(userId)
+          && isValidConversation(incoming(), userId, conversationId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'pinned', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt'])
+          );
+        allow delete: if isValidId(userId) && isValidId(conversationId) && isOwner(userId);
+
+        match /messages/{messageId} {
+          allow get: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId) && isOwner(userId);
+          allow list: if isValidId(userId) && isValidId(conversationId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+          allow create: if isValidId(userId)
+            && isValidId(conversationId)
+            && isValidId(messageId)
+            && isOwner(userId)
+            && isValidMessage(incoming(), userId, conversationId, messageId)
+            && incoming().createdAt == request.time
+            && (
+              exists(/databases/$(database)/documents/users/$(userId)/conversations/$(conversationId))
+              || existsAfter(/databases/$(database)/documents/users/$(userId)/conversations/$(conversationId))
+            );
+          allow update: if isValidId(userId)
+            && isValidId(conversationId)
+            && isValidId(messageId)
+            && isOwner(userId)
+            && isValidMessage(incoming(), userId, conversationId, messageId)
+            && incoming().id == existing().id
+            && incoming().ownerId == existing().ownerId
+            && incoming().conversationId == existing().conversationId
+            && incoming().role == existing().role
+            && incoming().createdAt == existing().createdAt
+            && incoming().diff(existing()).affectedKeys().hasOnly(['content', 'reasoning', 'usage', 'aborted', 'error']);
+          allow delete: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId) && isOwner(userId);
+        }
+      }
+    }
+
+    match /usageLogs/{logId} {
+      allow get: if isValidId(logId) && (isAdmin() || (isSignedIn() && existing().userId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isValidId(logId)
+        && isSignedIn()
+        && isValidUsageLog(incoming(), logId)
+        && incoming().userId == request.auth.uid
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+  }
+}
