@@ -1,0 +1,6 @@
+{
+  "name": "SeekChat",
+  "description": "A fast, ChatGPT-style AI chat workspace powered by deepseek-v4.1-flash-free via 100milionseek with streaming responses, markdown code blocks, and live daily token quota tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
