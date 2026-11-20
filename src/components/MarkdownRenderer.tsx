@@ -93,14 +93,15 @@ function CodeBlock({
           id: 'inline',
           language: previewKind,
           code,
-          title: getPreviewLabel(previewKind),
+          title: getPreviewLabel(previewKind, language),
+          rawLanguage: language,
         },
         theme,
         'light',
       );
     }
     return '';
-  }, [inlineMode, previewKind, code, theme, svgImgFallback]);
+  }, [inlineMode, previewKind, code, language, theme, svgImgFallback]);
 
   const inlineSvgUrl = useMemo(() => {
     if (previewKind !== 'svg') return '';
@@ -121,12 +122,15 @@ function CodeBlock({
   };
 
   const openFullPreview = () => {
-    if (!previewKind || !onPreviewArtifact) return;
+    if (!onPreviewArtifact) return;
+    const resolvedKind: PreviewArtifactKind = previewKind || 'code';
     onPreviewArtifact({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      language: previewKind,
+      language: resolvedKind,
       code,
-      title: getPreviewLabel(previewKind),
+      title: getPreviewLabel(resolvedKind, language),
+      rawLanguage: language || (resolvedKind === 'code' ? 'text' : resolvedKind),
+      lineCount: code.split(/\r?\n/).length,
     });
   };
 
@@ -165,15 +169,23 @@ function CodeBlock({
             </button>
           )}
 
-          {previewKind && onPreviewArtifact && (
+          {onPreviewArtifact && (
             <button
               type="button"
               onClick={openFullPreview}
-              title="Open in full split-screen preview"
+              title={
+                previewKind
+                  ? 'Open in Code Preview workspace'
+                  : 'Inspect in Code Preview workspace'
+              }
               className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-emerald-400 hover:text-emerald-300 hover:bg-zinc-800/80 transition-colors whitespace-nowrap shrink-0"
             >
-              <Play className="w-3 h-3 fill-current" />
-              <span>Preview</span>
+              {previewKind ? (
+                <Play className="w-3 h-3 fill-current" />
+              ) : (
+                <Maximize2 className="w-3 h-3" />
+              )}
+              <span>{previewKind ? 'Preview' : 'Inspect'}</span>
             </button>
           )}
 

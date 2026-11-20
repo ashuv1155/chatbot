@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   Check,
@@ -21,7 +21,11 @@ import {
 } from 'lucide-react';
 import type { ChatMessage, PreviewArtifact, SearchMode } from '../types/chat';
 import { MarkdownRenderer } from './MarkdownRenderer';
-import { attachmentToPreviewArtifact } from '../lib/previews';
+import { CodePreviewSection } from './CodePreviewSection';
+import {
+  attachmentToPreviewArtifact,
+  extractCodeArtifactsFromMarkdown,
+} from '../lib/previews';
 import { formatCompactNumber } from '../lib/storage';
 import {
   copyToClipboard,
@@ -271,6 +275,13 @@ export function MessageItem({
   const activeSources = message.sources || [];
   const activeQueries =
     message.searchProgress?.queries || message.searchQueries || [];
+  const codeArtifacts = useMemo(
+    () =>
+      message.error
+        ? []
+        : extractCodeArtifactsFromMarkdown(message.content, message.id),
+    [message.content, message.error, message.id],
+  );
 
   return (
     <div className="group flex items-start gap-3.5 sm:gap-4">
@@ -445,6 +456,15 @@ export function MessageItem({
               <span
                 className="inline-block w-1.5 h-4 ml-0.5 align-middle bg-emerald-500 animate-pulse rounded-xs"
                 aria-hidden="true"
+              />
+            )}
+
+            {codeArtifacts.length > 0 && (
+              <CodePreviewSection
+                artifacts={codeArtifacts}
+                theme={theme}
+                isStreaming={message.isStreaming}
+                onOpenWorkspace={onPreviewArtifact}
               />
             )}
           </div>

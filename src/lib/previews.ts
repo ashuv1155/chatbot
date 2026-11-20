@@ -80,7 +80,110 @@ export function mapLanguageToPreviewKind(
   return null;
 }
 
-export function getPreviewLabel(kind: PreviewArtifactKind): string {
+const CODE_LANG_EXT_MAP: Record<string, string> = {
+  python: 'py',
+  py: 'py',
+  typescript: 'ts',
+  ts: 'ts',
+  javascript: 'js',
+  js: 'js',
+  tsx: 'tsx',
+  jsx: 'jsx',
+  sql: 'sql',
+  bash: 'sh',
+  sh: 'sh',
+  shell: 'sh',
+  zsh: 'sh',
+  powershell: 'ps1',
+  ps1: 'ps1',
+  go: 'go',
+  golang: 'go',
+  rust: 'rs',
+  rs: 'rs',
+  java: 'java',
+  kotlin: 'kt',
+  kt: 'kt',
+  swift: 'swift',
+  c: 'c',
+  cpp: 'cpp',
+  'c++': 'cpp',
+  csharp: 'cs',
+  cs: 'cs',
+  'c#': 'cs',
+  php: 'php',
+  ruby: 'rb',
+  rb: 'rb',
+  yaml: 'yaml',
+  yml: 'yaml',
+  toml: 'toml',
+  xml: 'xml',
+  dockerfile: 'dockerfile',
+  docker: 'dockerfile',
+  graphql: 'graphql',
+  gql: 'graphql',
+  prisma: 'prisma',
+  scss: 'scss',
+  sass: 'sass',
+  less: 'less',
+  r: 'r',
+  dart: 'dart',
+  lua: 'lua',
+  perl: 'pl',
+  ini: 'ini',
+  env: 'env',
+};
+
+const CODE_LANG_LABEL_MAP: Record<string, string> = {
+  py: 'Python',
+  python: 'Python',
+  ts: 'TypeScript',
+  typescript: 'TypeScript',
+  js: 'JavaScript',
+  javascript: 'JavaScript',
+  sql: 'SQL',
+  sh: 'Shell',
+  bash: 'Bash',
+  shell: 'Shell',
+  zsh: 'Zsh',
+  powershell: 'PowerShell',
+  ps1: 'PowerShell',
+  go: 'Go',
+  golang: 'Go',
+  rust: 'Rust',
+  rs: 'Rust',
+  java: 'Java',
+  kotlin: 'Kotlin',
+  kt: 'Kotlin',
+  swift: 'Swift',
+  c: 'C',
+  cpp: 'C++',
+  'c++': 'C++',
+  cs: 'C#',
+  csharp: 'C#',
+  'c#': 'C#',
+  php: 'PHP',
+  rb: 'Ruby',
+  ruby: 'Ruby',
+  yaml: 'YAML',
+  yml: 'YAML',
+  toml: 'TOML',
+  xml: 'XML',
+  dockerfile: 'Dockerfile',
+  docker: 'Docker',
+  graphql: 'GraphQL',
+  prisma: 'Prisma',
+  dart: 'Dart',
+  r: 'R',
+};
+
+export function isLivePreviewableKind(kind: PreviewArtifactKind): boolean {
+  return kind !== 'code';
+}
+
+export function getPreviewLabel(
+  kind: PreviewArtifactKind,
+  rawLanguage?: string,
+): string {
   switch (kind) {
     case 'html':
       return 'HTML Preview';
@@ -99,7 +202,17 @@ export function getPreviewLabel(kind: PreviewArtifactKind): string {
     case 'css':
       return 'CSS Stylesheet';
     case 'javascript':
-      return 'JS / TS Runner';
+      return rawLanguage && /^(ts|typescript)$/i.test(rawLanguage)
+        ? 'TypeScript Runner'
+        : 'JS / TS Runner';
+    case 'code': {
+      const clean = (rawLanguage || '').trim().toLowerCase();
+      if (!clean) return 'Code Snippet';
+      const nice =
+        CODE_LANG_LABEL_MAP[clean] ||
+        clean.charAt(0).toUpperCase() + clean.slice(1);
+      return `${nice} Code`;
+    }
     case 'image':
       return 'Image Preview';
     case 'audio':
@@ -112,10 +225,11 @@ export function getPreviewLabel(kind: PreviewArtifactKind): string {
 export function getPreviewFileExtension(
   kind: PreviewArtifactKind,
   filename?: string,
+  rawLanguage?: string,
 ): string {
   if (filename && filename.includes('.')) {
     const ext = filename.split('.').pop();
-    if (ext && /^[a-z0-9]{1,8}$/i.test(ext)) return ext.toLowerCase();
+    if (ext && /^[a-z0-9]{1,10}$/i.test(ext)) return ext.toLowerCase();
   }
   switch (kind) {
     case 'html':
@@ -135,7 +249,13 @@ export function getPreviewFileExtension(
     case 'css':
       return 'css';
     case 'javascript':
-      return 'js';
+      return rawLanguage && /^(ts|typescript)$/i.test(rawLanguage)
+        ? 'ts'
+        : 'js';
+    case 'code': {
+      const clean = (rawLanguage || '').trim().toLowerCase();
+      return CODE_LANG_EXT_MAP[clean] || 'txt';
+    }
     case 'image':
       return 'png';
     case 'audio':
@@ -143,6 +263,100 @@ export function getPreviewFileExtension(
     case 'video':
       return 'mp4';
   }
+}
+
+function extractFilenameHint(code: string): string | undefined {
+  const firstLines = code.split(/\r?\n/).slice(0, 3);
+  for (const line of firstLines) {
+    const trimmed = line.trim();
+    const match = trimmed.match(
+      /^(?:\/\/|#|\/\*|<!--|--)\s*(?:file\s*:\s*)?([A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,10})\s*(?:\*\/|-->)?$/i,
+    );
+    if (match?.[1]) {
+      const candidate = match[1].split('/').pop() || match[1];
+      if (candidate.length <= 48) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Extracts completed fenced code blocks from an assistant markdown response into
+ * structured PreviewArtifact items so Ashutosh GPT can present dedicated Code Preview sections.
+ */
+export function extractCodeArtifactsFromMarkdown(
+  markdown: string,
+  messageId = 'msg',
+): PreviewArtifact[] {
+  if (!markdown) return [];
+  const prepared = preprocessMarkdownMedia(markdown);
+  const artifacts: PreviewArtifact[] = [];
+  const fenceRegex = /```([A-Za-z0-9_+#.-]*)[ \t]*\r?\n([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+  let idx = 0;
+
+  while ((match = fenceRegex.exec(prepared)) !== null) {
+    const rawLanguage = (match[1] || '').trim().toLowerCase();
+    const code = (match[2] || '').replace(/\n$/, '');
+    if (!code.trim()) continue;
+
+    // Skip trivial 1-line shell installs unless it's multi-line or explicitly previewable
+    const mapped = mapLanguageToPreviewKind(rawLanguage, code);
+    const kind: PreviewArtifactKind = mapped || 'code';
+    const lineCount = code.split(/\r?\n/).length;
+
+    if (
+      kind === 'code' &&
+      lineCount === 1 &&
+      code.trim().length < 48 &&
+      /^(?:bash|sh|shell|zsh|txt|text|plaintext|)$/.test(rawLanguage)
+    ) {
+      continue;
+    }
+
+    idx += 1;
+    const filename = extractFilenameHint(code);
+    const label = getPreviewLabel(kind, rawLanguage);
+    const title = filename || label;
+
+    artifacts.push({
+      id: `${messageId}-code-${idx}`,
+      language: kind,
+      code,
+      title,
+      filename,
+      rawLanguage: rawLanguage || (kind === 'code' ? 'text' : kind),
+      lineCount,
+      messageId,
+      index: idx,
+    });
+  }
+
+  return artifacts;
+}
+
+/**
+ * Detects whether a user prompt asks Ashutosh GPT to generate, write, build,
+ * or design code, UI components, scripts, diagrams, or web apps.
+ */
+export function isCodeGenerationPrompt(prompt: string): boolean {
+  const q = (prompt || '').trim().toLowerCase();
+  if (!q) return false;
+
+  const hasActionVerb =
+    /\b(?:generate|write|create|build|make|implement|code|develop|design|scaffold|refactor|convert|fix|debug|program|give me)\b/.test(
+      q,
+    );
+  const hasCodeTarget =
+    /\b(?:code|script|program|function|class|component|widget|app|application|website|webpage|landing page|dashboard|form|navbar|modal|card|table|chart|diagram|flowchart|svg|logo|icon|html|css|scss|javascript|js|typescript|ts|react|tsx|jsx|python|sql|bash|shell|api|endpoint|regex|algorithm|shader|canvas|calculator|timer|game|todo|portfolio)\b/.test(
+      q,
+    );
+
+  if (hasActionVerb && hasCodeTarget) return true;
+  if (/\b(?:in|using)\s+(?:html|css|js|javascript|ts|typescript|react|tsx|python|sql|mermaid|svg)\b/.test(q)) {
+    return true;
+  }
+  return false;
 }
 
 export function attachmentToPreviewArtifact(

@@ -94,6 +94,7 @@ export type PreviewArtifactKind =
   | 'json'
   | 'css'
   | 'javascript'
+  | 'code'
   | 'image'
   | 'audio'
   | 'video';
@@ -105,6 +106,10 @@ export interface PreviewArtifact {
   title: string;
   mimeType?: string;
   filename?: string;
+  rawLanguage?: string;
+  lineCount?: number;
+  messageId?: string;
+  index?: number;
 }
 
 export interface ModelPricingInfo {

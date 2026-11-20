@@ -9,6 +9,7 @@ import {
 import {
   ArrowDown,
   ChevronDown,
+  Code2,
   Download,
   FileCode2,
   FileText,
@@ -73,6 +74,11 @@ import {
 } from './lib/firebase';
 import { getAuthHeaders, isAdminUser } from './lib/admin';
 import { downloadFile, processUploadedFile } from './lib/browser';
+import {
+  extractCodeArtifactsFromMarkdown,
+  isCodeGenerationPrompt,
+  isLivePreviewableKind,
+} from './lib/previews';
 import { SSEChunkParser } from './lib/sse';
 import { Sidebar } from './components/Sidebar';
 import { MessageItem } from './components/MessageItem';
@@ -254,6 +260,7 @@ export default function App() {
   const streamingConvIdRef = useRef<string | null>(null);
   const pendingConvWritesRef = useRef<Map<string, Promise<void>>>(new Map());
   const lastSyncedConvCountRef = useRef<number | null>(null);
+  const autoOpenedMsgIdsRef = useRef<Set<string>>(new Set());
 
   userRef.current = user;
 
@@ -1330,6 +1337,85 @@ export default function App() {
     return null;
   }, [activeConversation]);
 
+  const conversationCodeArtifacts = useMemo(() => {
+    if (!activeConversation) return [];
+    const list: PreviewArtifact[] = [];
+    for (const msg of activeConversation.messages) {
+      if (msg.role === 'assistant' && !msg.error && msg.content) {
+        list.push(...extractCodeArtifactsFromMarkdown(msg.content, msg.id));
+      }
+    }
+    return list;
+  }, [activeConversation]);
+
+  const latestMessageCodeArtifacts = useMemo(() => {
+    if (!activeConversation) return [];
+    for (let i = activeConversation.messages.length - 1; i >= 0; i--) {
+      const msg = activeConversation.messages[i];
+      if (msg.role === 'assistant' && !msg.error && msg.content) {
+        const found = extractCodeArtifactsFromMarkdown(msg.content, msg.id);
+        if (found.length > 0) return found;
+      }
+    }
+    return [];
+  }, [activeConversation]);
+
+  const workspaceArtifacts = useMemo(() => {
+    if (previewArtifact?.messageId) {
+      const scoped = conversationCodeArtifacts.filter(
+        (a) => a.messageId === previewArtifact.messageId,
+      );
+      if (scoped.length > 0) return scoped;
+    }
+    return latestMessageCodeArtifacts.length > 0
+      ? latestMessageCodeArtifacts
+      : conversationCodeArtifacts;
+  }, [
+    conversationCodeArtifacts,
+    latestMessageCodeArtifacts,
+    previewArtifact?.messageId,
+  ]);
+
+  // Automatically open the Code Preview workspace on wide screens when Ashutosh GPT finishes generating code
+  useEffect(() => {
+    if (!activeConversation) return;
+    const msgs = activeConversation.messages;
+    const lastIdx = msgs.length - 1;
+    if (lastIdx < 1) return;
+
+    const lastMsg = msgs[lastIdx];
+    const prevMsg = msgs[lastIdx - 1];
+    if (
+      lastMsg.role !== 'assistant' ||
+      lastMsg.isStreaming ||
+      lastMsg.error ||
+      !lastMsg.content ||
+      prevMsg.role !== 'user'
+    ) {
+      return;
+    }
+
+    if (autoOpenedMsgIdsRef.current.has(lastMsg.id)) return;
+
+    const shouldAutoOpen =
+      isCodeGenerationPrompt(prevMsg.content) || responseStyle === 'code-first';
+    if (!shouldAutoOpen) return;
+
+    const generated = extractCodeArtifactsFromMarkdown(
+      lastMsg.content,
+      lastMsg.id,
+    );
+    if (generated.length === 0) return;
+
+    autoOpenedMsgIdsRef.current.add(lastMsg.id);
+
+    if (typeof window !== 'undefined' && window.innerWidth >= 1024) {
+      const preferred =
+        generated.find((a) => isLivePreviewableKind(a.language)) || generated[0];
+      setPreviewArtifact(preferred);
+    }
+  }, [activeConversation, responseStyle]);
+
   const primaryModel = useMemo(
     () => models.find((m) => m.id === 'deepseek-v4.1-flash-free'),
     [models],
@@ -1463,6 +1549,38 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
+            {conversationCodeArtifacts.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (previewArtifact) {
+                    setPreviewArtifact(null);
+                  } else {
+                    const targetList =
+                      latestMessageCodeArtifacts.length > 0
+                        ? latestMessageCodeArtifacts
+                        : conversationCodeArtifacts;
+                    const preferred =
+                      targetList.find((a) => isLivePreviewableKind(a.language)) ||
+                      targetList[targetList.length - 1];
+                    if (preferred) setPreviewArtifact(preferred);
+                  }
+                }}
+                title="Toggle Code Preview workspace"
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
+                  previewArtifact
+                    ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                    : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                }`}
+              >
+                <Code2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Code Preview</span>
+                <span className="font-mono text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
+                  ({conversationCodeArtifacts.length})
+                </span>
+              </button>
+            )}
+
             {isAdmin && (
               <button
                 type="button"
@@ -1695,6 +1813,8 @@ export default function App() {
 
       <ArtifactPreview
         artifact={previewArtifact}
+        artifacts={workspaceArtifacts}
+        onSelectArtifact={(next) => setPreviewArtifact(next)}
         theme={theme}
         onClose={() => setPreviewArtifact(null)}
       />
